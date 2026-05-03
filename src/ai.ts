@@ -1,9 +1,11 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import fs from 'fs';
-import path from 'path';
+import path, { dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { config } from './config.js';
 
-const styleProfilePath = path.join(process.cwd(), 'data', 'style_profile.json');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const styleProfilePath = path.join(__dirname, '..', 'data', 'style_profile.json');
 
 function loadStyleProfile() {
   try {

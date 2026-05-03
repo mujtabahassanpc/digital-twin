@@ -1,6 +1,7 @@
 {
   "name": "digital-twin",
   "version": "1.0.0",
+  "type": "module",
   "description": "Mujtaba's AI digital twin — Sylheti + English WhatsApp proxy",
   "main": "dist/index.js",
   "scripts": {

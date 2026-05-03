@@ -1,9 +1,13 @@
 import express from 'express';
 import cors from 'cors';
-import path from 'path';
+import path, { dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { webhookRouter } from './webhook.js';
 import { initDatabase } from './db.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const rootDir = path.join(__dirname, '..');
 
 const app = express();
 
@@ -13,7 +17,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // Static files (dashboard)
-app.use(express.static(path.join(process.cwd(), 'public')));
+app.use(express.static(path.join(rootDir, 'public')));
 
 // API routes
 app.use('/api', webhookRouter);
@@ -35,7 +39,7 @@ app.get('/health', (_req, res) => {
 
 // Catch-all for SPA
 app.get('*', (_req, res) => {
-  res.sendFile(path.join(process.cwd(), 'public', 'index.html'));
+  res.sendFile(path.join(rootDir, 'public', 'index.html'));
 });
 
 // Error handler
