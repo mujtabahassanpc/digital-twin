@@ -2,7 +2,6 @@ node_modules/
 dist/
 .env
 data/*.json
-!data/style_profile.template.json
 *.tsbuildinfo
 
 .vercel

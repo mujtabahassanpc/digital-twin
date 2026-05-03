@@ -32,6 +32,7 @@ app.get('/health', (_req, res) => {
       whatsapp: config.isWhatsAppReady(),
       ai: config.isAiReady(),
       database: config.isDbReady(),
+      telegram: config.isTelegramReady(),
     },
     busyMode: config.busyMode,
   });
@@ -57,11 +58,12 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
     try {
       await initDatabase();
       app.listen(config.port, () => {
-        console.log(`\n🤖 Digital Twin running on http://localhost:${config.port}`);
+        console.log(`\n🤖 Mahir Abher (Mujtaba ka Bhai) running on http://localhost:${config.port}`);
         console.log(`   WhatsApp: ${config.isWhatsAppReady() ? '✅ Ready' : '⏳ Not configured'}`);
         console.log(`   AI (Gemini): ${config.isAiReady() ? '✅ Ready' : '⏳ Not configured'}`);
         console.log(`   Database (Neon): ${config.isDbReady() ? '✅ Ready' : '⏳ Not configured'}`);
-        console.log(`   Busy Mode: ${config.busyMode ? 'ON (AI auto-replies)' : 'OFF'}`);
+        console.log(`   Telegram: ${config.isTelegramReady() ? '✅ Ready' : '⏳ Not configured'}`);
+        console.log(`   Busy Mode: ${config.busyMode ? 'ON (Mahir auto-replies)' : 'OFF'}`);
         console.log(`\n   Webhook: POST /api/webhook`);
         console.log(`   Status: GET /health`);
         console.log(`   Dashboard: GET /\n`);

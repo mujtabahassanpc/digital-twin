@@ -7,8 +7,17 @@ import {
 } from './whatsapp.js';
 import { generateReply } from './ai.js';
 import { saveMessage, getConversationHistory, initDatabase } from './db.js';
+import { sendInstantAlert } from './telegram.js';
 
 const router = Router();
+
+// Track important messages for instant alerts
+const urgentKeywords = ['urgent', 'emergency', 'help', 'zaroori', 'jaldi', 'important', 'problem', 'issue'];
+
+function isUrgent(text: string): boolean {
+  const lower = text.toLowerCase();
+  return urgentKeywords.some((kw) => lower.includes(kw));
+}
 
 // Webhook verification (GET — Meta sends this to verify the endpoint)
 router.get('/webhook', (req, res) => {
@@ -59,6 +68,16 @@ router.post('/webhook', async (req, res) => {
       parsed.messageId
     );
 
+    // Send instant Telegram alert for urgent messages
+    if (isUrgent(parsed.text)) {
+      console.log('URGENT message detected — sending Telegram alert');
+      await sendInstantAlert(
+        parsed.senderName || parsed.senderId,
+        parsed.text,
+        'Urgent keywords detected'
+      );
+    }
+
     // Check if busy mode is on (default: true — AI handles replies)
     if (!config.busyMode) {
       console.log('Busy mode OFF — not auto-replying');
@@ -104,6 +123,7 @@ router.get('/test', (_req, res) => {
     whatsappReady: config.isWhatsAppReady(),
     aiReady: config.isAiReady(),
     dbReady: config.isDbReady(),
+    telegramReady: config.isTelegramReady(),
   });
 });
 
@@ -111,6 +131,66 @@ router.get('/test', (_req, res) => {
 router.post('/toggle', (_req, res) => {
   config.busyMode = !config.busyMode;
   res.json({ busyMode: config.busyMode });
+});
+
+// Trigger daily digest manually (for testing)
+router.post('/digest', async (_req, res) => {
+  const { sendDailyDigest } = await import('./telegram.js');
+  const { Pool } = await import('pg');
+
+  try {
+    const pool = new Pool({
+      connectionString: config.databaseUrl,
+      ssl: { rejectUnauthorized: false },
+    });
+
+    const today = new Date().toISOString().split('T')[0];
+    const totalResult = await pool.query(
+      `SELECT COUNT(*) FROM conversations WHERE DATE(timestamp) = $1`,
+      [today]
+    );
+    const totalMessages = parseInt(totalResult.rows[0].count);
+
+    const contactsResult = await pool.query(
+      `SELECT sender_name, COUNT(*) as count FROM conversations WHERE DATE(timestamp) = $1 GROUP BY sender_name ORDER BY count DESC LIMIT 5`,
+      [today]
+    );
+    const topContacts = contactsResult.rows.map((r) => ({
+      name: r.sender_name || 'Unknown',
+      count: parseInt(r.count),
+    }));
+
+    const uniqueContacts = topContacts.length;
+
+    // Get important messages (long ones or from frequent contacts)
+    const importantResult = await pool.query(
+      `SELECT sender_name, content FROM conversations WHERE DATE(timestamp) = $1 AND LENGTH(content) > 50 AND message_type = 'incoming' ORDER BY timestamp DESC LIMIT 5`,
+      [today]
+    );
+    const importantHighlights = importantResult.rows.map(
+      (r) => `${r.sender_name || 'Unknown'}: ${r.content.substring(0, 100)}`
+    );
+
+    await pool.end();
+
+    const sent = await sendDailyDigest({
+      totalMessages,
+      uniqueContacts,
+      topContacts,
+      importantHighlights,
+      date: new Date().toLocaleDateString('en-IN', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      }),
+    });
+
+    res.json({ success: sent, message: sent ? 'Digest sent to Telegram' : 'Failed to send digest' });
+  } catch (error) {
+    console.error('Digest error:', error);
+    res.status(500).json({ error: 'Failed to generate digest' });
+  }
 });
 
 export const webhookRouter = router;

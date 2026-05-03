@@ -87,8 +87,8 @@
 </head>
 <body>
   <div class="container">
-    <h1>🤖 Digital Twin</h1>
-    <p class="subtitle">Mujtaba's AI WhatsApp Proxy — Sylheti + English</p>
+    <h1>🤖 Mahir Abher</h1>
+    <p class="subtitle">Mujtaba ka Bhai — WhatsApp Proxy (Sylheti + English)</p>
 
     <div class="card">
       <h2>System Status</h2>
@@ -105,6 +105,10 @@
         <span class="status-value" id="db-status">Checking...</span>
       </div>
       <div class="status-row">
+        <span class="status-label">Telegram Bot</span>
+        <span class="status-value" id="telegram-status">Checking...</span>
+      </div>
+      <div class="status-row">
         <span class="status-label">Uptime</span>
         <span class="status-value" id="uptime">—</span>
       </div>
@@ -113,15 +117,26 @@
     <div class="card">
       <h2>Busy Mode</h2>
       <p style="color: #888; font-size: 0.85rem; margin-bottom: 0.5rem;">
-        When ON, AI replies to messages on behalf of Mujtaba.
+        When ON, Mahir replies to messages on behalf of Mujtaba.
       </p>
       <button class="btn-toggle" id="toggle-btn" onclick="toggleBusyMode()">
         Loading...
       </button>
     </div>
 
+    <div class="card">
+      <h2>Telegram Digest</h2>
+      <p style="color: #888; font-size: 0.85rem; margin-bottom: 0.5rem;">
+        Send today's summary to Mujtaba on Telegram.
+      </p>
+      <button class="btn-toggle" id="digest-btn" onclick="triggerDigest()">
+        📩 Send Daily Digest
+      </button>
+      <p id="digest-result" style="color: #888; font-size: 0.8rem; margin-top: 0.5rem; text-align: center;"></p>
+    </div>
+
     <div class="footer">
-      Built with Gemini AI + WhatsApp Cloud API<br>
+      Built with Gemini AI + WhatsApp Cloud API + Telegram<br>
       Language: Sylheti (Romanized) + English
     </div>
   </div>
@@ -141,6 +156,9 @@
         document.getElementById('db-status').textContent = data.services.database ? '✅ Ready' : '⏳ Not set';
         document.getElementById('db-status').className = 'status-value ' + (data.services.database ? 'online' : 'pending');
 
+        document.getElementById('telegram-status').textContent = data.services.telegram ? '✅ Ready' : '⏳ Not set';
+        document.getElementById('telegram-status').className = 'status-value ' + (data.services.telegram ? 'online' : 'pending');
+
         const mins = Math.floor(data.uptime / 60);
         const hrs = Math.floor(mins / 60);
         document.getElementById('uptime').textContent = hrs > 0 ? `${hrs}h ${mins % 60}m` : `${mins}m`;
@@ -159,6 +177,20 @@
         fetchStatus();
       } catch (e) {
         alert('Failed to toggle busy mode');
+      }
+    }
+
+    async function triggerDigest() {
+      const resultEl = document.getElementById('digest-result');
+      resultEl.textContent = 'Sending...';
+      try {
+        const res = await fetch('/api/digest', { method: 'POST' });
+        const data = await res.json();
+        resultEl.textContent = data.message || (data.success ? 'Sent!' : 'Failed');
+        resultEl.style.color = data.success ? '#25D366' : '#ff4444';
+      } catch (e) {
+        resultEl.textContent = 'Failed to send digest';
+        resultEl.style.color = '#ff4444';
       }
     }
 

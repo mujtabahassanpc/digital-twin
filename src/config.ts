@@ -31,6 +31,10 @@ export const config = {
   port: parseInt(process.env.APP_PORT || '3000', 10),
   busyMode: process.env.BUSY_MODE !== 'false',
 
+  // Telegram Bot
+  telegramBotToken: optionalEnv('TELEGRAM_BOT_TOKEN', ''),
+  telegramChatId: optionalEnv('TELEGRAM_CHAT_ID', ''),
+
   // Feature flags
   isWhatsAppReady(): boolean {
     return !!(this.whatsappPhoneNumberId && this.whatsappAccessToken);
@@ -42,5 +46,9 @@ export const config = {
 
   isDbReady(): boolean {
     return !!this.databaseUrl;
+  },
+
+  isTelegramReady(): boolean {
+    return !!(this.telegramBotToken && this.telegramChatId);
   },
 };
