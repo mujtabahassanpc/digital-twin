@@ -1,0 +1,27 @@
+{
+  "name": "digital-twin",
+  "version": "1.0.0",
+  "description": "Mujtaba's AI digital twin — Sylheti + English WhatsApp proxy",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "train": "tsx src/style.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^0.14.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
