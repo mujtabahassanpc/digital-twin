@@ -3,6 +3,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   WASocket,
+  PresenceData,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { EventEmitter } from 'events';
@@ -26,7 +27,7 @@ let sock: ReturnType<typeof makeWASocket> | null = null;
 let currentQR: string | null = null;
 let isReady = false;
 let reconnectAttempts = 0;
-const MAX_RECONNECT_DELAY = 60000; // 60s max
+const MAX_RECONNECT_DELAY = 60000;
 
 export const whatsappEmitter = new EventEmitter();
 
@@ -55,7 +56,6 @@ export async function startWhatsApp() {
     if (connection === 'close') {
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
       const wasLoggedOut = statusCode === DisconnectReason.loggedOut;
-      const wasStreamError = statusCode === 515;
 
       console.log(`⚠️ WhatsApp disconnected (code: ${statusCode}), logged out: ${wasLoggedOut}`);
       isReady = false;
@@ -63,11 +63,9 @@ export async function startWhatsApp() {
 
       if (wasLoggedOut) {
         console.log('🔑 Logged out — need to re-scan QR code');
-        // Auth state is cleared by useMultiFileAuthState, restart fresh
         reconnectAttempts = 0;
         setTimeout(() => startWhatsApp(), 3000);
       } else {
-        // Exponential backoff for reconnect
         reconnectAttempts++;
         const delay = Math.min(2000 * reconnectAttempts, MAX_RECONNECT_DELAY);
         console.log(`🔄 Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts})`);
@@ -89,14 +87,57 @@ export async function startWhatsApp() {
     if (!msg.message || msg.key.fromMe) return;
 
     const senderId = msg.key.remoteJid!;
-    const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
     const senderName = msg.pushName || 'Unknown';
+
+    // Extract text from various message types
+    let text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
+
+    // Handle image captions
+    if (msg.message?.imageMessage) {
+      const caption = msg.message.imageMessage.caption;
+      text = caption ? `[Photo] ${caption}` : '[Photo]';
+    }
+
+    // Handle voice notes
+    if (msg.message?.audioMessage) {
+      text = '[Voice message]';
+    }
+
+    // Handle video
+    if (msg.message?.videoMessage) {
+      const caption = msg.message.videoMessage.caption;
+      text = caption ? `[Video] ${caption}` : '[Video]';
+    }
+
+    // Handle document
+    if (msg.message?.documentMessage) {
+      text = `[Document: ${msg.message.documentMessage.fileName || 'file'}]`;
+    }
+
+    // Handle sticker
+    if (msg.message?.stickerMessage) {
+      text = '[Sticker]';
+    }
 
     if (text) {
       console.log(`Message from ${senderName} (${senderId}): ${text}`);
       whatsappEmitter.emit('message', { senderId, senderName, text });
     }
   });
+}
+
+export async function showTyping(to: string, durationMs: number): Promise<void> {
+  if (!sock) return;
+  try {
+    await sock.sendPresenceUpdate('composing', to);
+    setTimeout(async () => {
+      if (sock) {
+        await sock.sendPresenceUpdate('paused', to);
+      }
+    }, durationMs);
+  } catch (e) {
+    // silent
+  }
 }
 
 export async function sendWhatsAppMessage(to: string, text: string) {

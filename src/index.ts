@@ -6,7 +6,7 @@ import { config } from './config.js';
 import { initDatabase } from './db.js';
 import { generateReply } from './ai.js';
 import { saveMessage, getConversationHistory } from './db.js';
-import { startWhatsApp, sendWhatsAppMessage, getQRCode, isConnected, whatsappEmitter } from './whatsapp.js';
+import { startWhatsApp, sendWhatsAppMessage, showTyping, getQRCode, isConnected, whatsappEmitter } from './whatsapp.js';
 import { sendInstantAlert, sendImportantConversationAlert, handleTelegramCommand } from './telegram.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -45,14 +45,13 @@ whatsappEmitter.on('message', async (data: { senderId: string; senderName: strin
     if (isImportant) {
       console.log(`🔔 Important conversation from ${data.senderName} (${data.senderId})`);
 
-      // Get recent context for Mujtaba
       const history = await getConversationHistory(data.senderId, 5);
       const context = history.map((h: any) => `${h.role === 'user' ? '👤' : '🤖'} ${h.content}`).join('\n');
 
-      // Send Telegram alert to Mujtaba
       await sendImportantConversationAlert(data.senderName, data.senderId, context || 'No recent history');
 
-      // Mahir responds with "Acha bolbo" — telling user to go ahead
+      // Show typing then reply
+      await showTyping(data.senderId, 2000);
       const reply = "acha bolbo, me sun raha hu 🤲";
       await sendWhatsAppMessage(data.senderId, reply);
       await saveMessage(data.senderId, undefined, 'outgoing', reply, true);
@@ -74,13 +73,19 @@ whatsappEmitter.on('message', async (data: { senderId: string; senderName: strin
     // Get conversation history
     const history = await getConversationHistory(data.senderId, 10);
 
-    // Generate AI reply (with senderId for deflection tracking)
-    const reply = await generateReply(data.text, history, data.senderName, data.senderId);
-    console.log(`💬 AI Reply to ${data.senderName}: ${reply}`);
+    // Generate AI reply with metadata
+    const result = await generateReply(data.text, history, data.senderName, data.senderId);
+    console.log(`💬 AI Reply to ${data.senderName} (${result.metadata.typingDelay}ms delay): ${result.text}`);
+
+    // Show typing indicator for realistic delay
+    await showTyping(data.senderId, result.metadata.typingDelay);
+
+    // Wait for typing to finish before sending
+    await new Promise((resolve) => setTimeout(resolve, result.metadata.typingDelay));
 
     // Send reply
-    await sendWhatsAppMessage(data.senderId, reply);
-    await saveMessage(data.senderId, undefined, 'outgoing', reply, true);
+    await sendWhatsAppMessage(data.senderId, result.text);
+    await saveMessage(data.senderId, undefined, 'outgoing', result.text, true);
   } catch (error) {
     console.error('Error processing message:', error);
   }
