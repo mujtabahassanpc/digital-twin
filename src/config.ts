@@ -15,8 +15,15 @@ function optionalEnv(key: string, fallback?: string): string {
 }
 
 export const config = {
-  // Gemini AI
+  // Gemini AI — single key (legacy)
   geminiApiKey: optionalEnv('GEMINI_API_KEY', ''),
+
+  // Gemini AI — multiple keys pool (comma-separated)
+  // Format: GEMINI_API_KEYS=key1,key2,key3
+  geminiApiKeys: optionalEnv('GEMINI_API_KEYS', '')
+    .split(',')
+    .map((k) => k.trim())
+    .filter((k) => k.length > 0),
 
   // Neon Database
   databaseUrl: optionalEnv('DATABASE_URL', ''),
@@ -31,7 +38,14 @@ export const config = {
 
   // Feature flags
   isAiReady(): boolean {
-    return !!this.geminiApiKey;
+    return this.getGeminiKeys().length > 0;
+  },
+
+  // Get all active Gemini keys (prioritizes pool over single key)
+  getGeminiKeys(): string[] {
+    if (this.geminiApiKeys.length > 0) return this.geminiApiKeys;
+    if (this.geminiApiKey) return [this.geminiApiKey];
+    return [];
   },
 
   isDbReady(): boolean {

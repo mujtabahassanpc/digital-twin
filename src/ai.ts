@@ -221,13 +221,33 @@ RULES:
 ${senderName ? `Talking to: ${senderName}` : ''}${contextInstructions}${flowInstruction}`;
 }
 
+// Gemini API key rotation
+let currentKeyIndex = 0;
 let ai: GoogleGenAI | null = null;
+
+function getAvailableKeys(): string[] {
+  const allKeys = config.getGeminiKeys();
+  return allKeys;
+}
 
 function getAI(): GoogleGenAI {
   if (!ai) {
-    ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
+    const keys = getAvailableKeys();
+    if (keys.length === 0) {
+      throw new Error('No Gemini API keys configured');
+    }
+    ai = new GoogleGenAI({ apiKey: keys[0] });
   }
   return ai;
+}
+
+function rotateAIKey() {
+  const keys = getAvailableKeys();
+  if (keys.length <= 1) return; // No other keys to rotate to
+
+  currentKeyIndex = (currentKeyIndex + 1) % keys.length;
+  ai = new GoogleGenAI({ apiKey: keys[currentKeyIndex] });
+  console.log(`🔄 Rotated to Gemini API key #${currentKeyIndex + 1}/${keys.length}`);
 }
 
 export interface ConversationEntry {
@@ -402,8 +422,45 @@ export async function generateReply(
     const isRateLimited = errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('RESOURCE_EXHAUSTED');
 
     if (isRateLimited) {
+      const keys = getAvailableKeys();
+      if (keys.length > 1) {
+        // Try rotating to next key and retry once
+        rotateAIKey();
+        try {
+          const response = await getAI().models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: fullPrompt,
+            config: {
+              temperature: 0.85,
+              topP: 0.9,
+              maxOutputTokens: 500,
+            },
+          });
+
+          let reply = response.text?.trim() || '';
+          reply = reply.replace(/^(Mahir:|Abher:|Reply:|"|')/gi, '').trim();
+          reply = reply.replace(/^["']|["']$/g, '').trim();
+
+          if (reply.length < 3) {
+            reply = getNextDeflection(senderId || 'unknown', style);
+          }
+
+          const typingDelay = getTypingDelay(reply.length, messageContext.urgency);
+          return {
+            text: reply,
+            metadata: {
+              typingDelay,
+              isImportant: messageContext.urgency >= 7,
+            },
+          };
+        } catch (retryError: any) {
+          console.error('Gemini retry also failed:', retryError);
+          // All keys exhausted — fall through to natural fallback
+        }
+      }
+
       geminiRateLimitedUntil = Date.now() + 60_000;
-      console.log('⏳ Gemini rate limited — using natural fallback for 60s');
+      console.log('⏳ All Gemini keys exhausted — using natural fallback for 60s');
     }
 
     // Don't use deflections — use natural conversation continuations instead
