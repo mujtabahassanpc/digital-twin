@@ -2,7 +2,6 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  makeInMemoryStore,
   WASocket,
   BaileysEventMap,
 } from '@whiskeysockets/baileys';
@@ -12,11 +11,12 @@ import pino from 'pino';
 import QRCode from 'qrcode';
 import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
+import NodeCache from 'node-cache';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const authDir = path.join(__dirname, '..', 'auth_info_baileys');
 
-const store = makeInMemoryStore({ logger: pino().child({ level: 'silent', stream: 'store' }) });
+const msgRetryCounterCache = new NodeCache();
 
 let sock: ReturnType<typeof makeWASocket> | null = null;
 let currentQR: string | null = null;
@@ -33,9 +33,8 @@ export async function startWhatsApp() {
     logger: pino({ level: 'silent' }),
     auth: state,
     printQRInTerminal: true,
+    msgRetryCounterCache,
   });
-
-  store.bind(sock.ev);
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
