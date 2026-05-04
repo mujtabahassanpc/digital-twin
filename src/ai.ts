@@ -7,6 +7,9 @@ import { config } from './config.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const styleProfilePath = path.join(__dirname, '..', 'data', 'style_profile.json');
 
+// Track deflection usage per sender to avoid repetition
+const deflectionHistory: Record<string, string[]> = {};
+
 function loadStyleProfile() {
   try {
     const raw = fs.readFileSync(styleProfilePath, 'utf-8');
@@ -14,6 +17,78 @@ function loadStyleProfile() {
   } catch {
     return null;
   }
+}
+
+function saveStyleProfile(profile: any) {
+  try {
+    fs.writeFileSync(styleProfilePath, JSON.stringify(profile, null, 2));
+  } catch (e) {
+    console.error('Failed to save style profile:', e);
+  }
+}
+
+// Extract and learn new words from user messages
+function learnFromMessage(userMessage: string) {
+  try {
+    const style = loadStyleProfile();
+    if (!style) return;
+
+    const lower = userMessage.toLowerCase();
+    const words = lower.split(/\s+/).filter((w) => w.length > 2 && /^[a-z]+$/.test(w));
+
+    // Known stop words to ignore
+    const stopWords = new Set([
+      'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had',
+      'her', 'was', 'one', 'our', 'out', 'has', 'have', 'been', 'with',
+      'this', 'that', 'from', 'they', 'will', 'each', 'make', 'like',
+      'just', 'over', 'such', 'more', 'than', 'when', 'what', 'where',
+      'who', 'why', 'how', 'does', 'did', 'do', 'is', 'it', 'in', 'on',
+      'or', 'an', 'as', 'at', 'by', 'to', 'of', 'so', 'no', 'up', 'if',
+      'oo', 'ki', 'ho', 'na', 're', 'hai', 'tha', 'tha', 'rah', 'kar',
+    ]);
+
+    // Find potential new slang (words not already in profile)
+    const existingSlang = new Set((style.slang_words || []).map((s: string) => s.toLowerCase()));
+    const newWords = words.filter((w) => !stopWords.has(w) && !existingSlang.has(w));
+
+    // Track word frequency in a simple way — only add if it looks like slang (not common English)
+    const sylhetiIndicators = ['kita', 'bala', 'kbr', 'kamon', 'kail', 'koi', 'keno', 'oy', 'naa',
+      'muje', 'tore', 'akhon', 'pore', 'matha', 'koros', 'jaitay', 'ba', 'ni', 'os', 'ase',
+      'asos', 'bolbo', 'bolos', 'koiya', 'kire', 'bhai', 'bhaijaan'];
+
+    for (const word of newWords) {
+      // If word contains Sylheti patterns or looks like a unique word, add it
+      const isSylhetiLike = sylhetiIndicators.some((indicator) => word.includes(indicator) || indicator.includes(word));
+      if (isSylhetiLike || (word.length >= 4 && word.length <= 10)) {
+        if (!existingSlang.has(word)) {
+          style.slang_words = style.slang_words || [];
+          style.slang_words.push(word);
+          existingSlang.add(word);
+          console.log(`📚 Learned new word: "${word}"`);
+        }
+      }
+    }
+
+    saveStyleProfile(style);
+  } catch (e) {
+    // Silent fail — learning is optional
+  }
+}
+
+function getNextDeflection(senderId: string, style: any): string {
+  const deflections = style?.deflection_phrases || ['acha me puchke batata hu'];
+  if (!deflectionHistory[senderId]) {
+    deflectionHistory[senderId] = [];
+  }
+
+  // Filter out recently used deflections (last 3)
+  const recent = deflectionHistory[senderId].slice(-3);
+  const available = deflections.filter((d: string) => !recent.includes(d));
+  const pool = available.length > 0 ? available : deflections;
+
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+  deflectionHistory[senderId].push(pick);
+  return pick;
 }
 
 function buildSystemPrompt(style: any): string {
@@ -108,10 +183,14 @@ export interface ConversationEntry {
 export async function generateReply(
   senderMessage: string,
   conversationHistory: ConversationEntry[] = [],
-  senderName?: string
+  senderName?: string,
+  senderId?: string
 ): Promise<string> {
   const style = loadStyleProfile();
   const systemPrompt = buildSystemPrompt(style);
+
+  // Learn from this message
+  learnFromMessage(senderMessage);
 
   const recentHistory = conversationHistory.slice(-10);
 
@@ -150,15 +229,13 @@ export async function generateReply(
     ];
     for (const pattern of formalPatterns) {
       if (pattern.test(reply)) {
-        const deflections = style?.deflection_phrases || ['acha me puchke batata hu'];
-        return deflections[Math.floor(Math.random() * deflections.length)];
+        return getNextDeflection(senderId || 'unknown', style);
       }
     }
 
-    // If reply is empty or too short, use a safe deflection
+    // If reply is empty or too short, use rotating deflection
     if (reply.length < 3) {
-      const deflections = style?.deflection_phrases || ['acha me puchke batata hu'];
-      reply = deflections[Math.floor(Math.random() * deflections.length)];
+      reply = getNextDeflection(senderId || 'unknown', style);
     }
 
     // Cap at 150 chars to keep it natural
@@ -169,7 +246,6 @@ export async function generateReply(
     return reply;
   } catch (error) {
     console.error('Gemini API error:', error);
-    const deflections = style?.deflection_phrases || ['mmm, pore bolbo'];
-    return deflections[Math.floor(Math.random() * deflections.length)];
+    return getNextDeflection(senderId || 'unknown', style);
   }
 }

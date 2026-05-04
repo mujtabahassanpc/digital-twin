@@ -7,7 +7,7 @@ import { initDatabase } from './db.js';
 import { generateReply } from './ai.js';
 import { saveMessage, getConversationHistory } from './db.js';
 import { startWhatsApp, sendWhatsAppMessage, getQRCode, isConnected, whatsappEmitter } from './whatsapp.js';
-import { sendInstantAlert } from './telegram.js';
+import { sendInstantAlert, sendImportantConversationAlert, handleTelegramCommand } from './telegram.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..');
@@ -24,14 +24,33 @@ app.use(express.static(path.join(rootDir, 'public')));
 
 // WhatsApp Event Handler
 const urgentKeywords = ['urgent', 'emergency', 'help', 'zaroori', 'jaldi', 'important', 'problem', 'issue'];
+const importantRequestPhrases = ['acha bolbo', 'important baat hai', 'zaroori baat', 'mujtaba se baat karni hai', 'baat karni hai', 'talk to mujtaba'];
 
 whatsappEmitter.on('message', async (data: { senderId: string; senderName: string; text: string }) => {
   try {
     // Save incoming message
     await saveMessage(data.senderId, data.senderName, 'incoming', data.text, false);
 
-    // Telegram instant alert
     const lower = data.text.toLowerCase();
+
+    // Check for "Acha bolbo" — important conversation request
+    if (importantRequestPhrases.some((phrase) => lower.includes(phrase))) {
+      console.log(`🔔 Important conversation request from ${data.senderName} (${data.senderId})`);
+
+      // Get recent context for Mujtaba
+      const history = await getConversationHistory(data.senderId, 5);
+      const context = history.map((h: any) => `${h.role === 'user' ? '👤' : '🤖'} ${h.content}`).join('\n');
+
+      await sendImportantConversationAlert(data.senderName, data.senderId, context || 'No recent history');
+
+      // Give user a natural response
+      const reply = "thik hai bhai, me Mujtaba ko bol dunga. oo jaldi reply karega inshaAllah 🤲";
+      await sendWhatsAppMessage(data.senderId, reply);
+      await saveMessage(data.senderId, undefined, 'outgoing', reply, true);
+      return;
+    }
+
+    // Telegram instant alert for urgent keywords
     if (urgentKeywords.some((kw) => lower.includes(kw))) {
       console.log('🚨 URGENT message detected — sending Telegram alert');
       await sendInstantAlert(data.senderName, data.text, 'Urgent keywords detected');
@@ -46,8 +65,8 @@ whatsappEmitter.on('message', async (data: { senderId: string; senderName: strin
     // Get conversation history
     const history = await getConversationHistory(data.senderId, 10);
 
-    // Generate AI reply
-    const reply = await generateReply(data.text, history, data.senderName);
+    // Generate AI reply (with senderId for deflection tracking)
+    const reply = await generateReply(data.text, history, data.senderName, data.senderId);
     console.log(`💬 AI Reply to ${data.senderName}: ${reply}`);
 
     // Send reply
@@ -58,8 +77,60 @@ whatsappEmitter.on('message', async (data: { senderId: string; senderName: strin
   }
 });
 
+// Telegram Bot Polling (commands)
+let telegramUpdateOffset = 0;
+async function pollTelegram() {
+  if (!config.isTelegramReady()) return;
+
+  try {
+    const url = `https://api.telegram.org/bot${config.telegramBotToken}/getUpdates?offset=${telegramUpdateOffset}&timeout=5`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (data.ok && data.result.length > 0) {
+      for (const update of data.result) {
+        telegramUpdateOffset = update.update_id + 1;
+
+        const msg = update.message;
+        if (!msg || !msg.text) continue;
+
+        if (msg.text.startsWith('/')) {
+          const parts = msg.text.substring(1).split(' ');
+          const command = parts[0].toLowerCase();
+          const args = parts.slice(1).join(' ');
+          console.log(`📩 Telegram command: /${command} ${args}`);
+          await handleTelegramCommand(command, args);
+        }
+
+        // Handle callback queries (button clicks)
+        if (update.callback_query) {
+          const cb = update.callback_query;
+          if (cb.data === 'toggle_busy') {
+            config.busyMode = !config.busyMode;
+            const url2 = `https://api.telegram.org/bot${config.telegramBotToken}/answerCallbackQuery`;
+            await fetch(url2, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ callback_query_id: cb.id, text: `Busy mode: ${config.busyMode ? 'ON' : 'OFF'}` }),
+            });
+            await handleTelegramCommand('status', '');
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Telegram poll error:', error);
+  }
+
+  // Poll every 3 seconds
+  setTimeout(pollTelegram, 3000);
+}
+
 // Start WhatsApp connection
 startWhatsApp().catch((err) => console.error('Failed to start WhatsApp:', err));
+
+// Start Telegram polling
+setTimeout(pollTelegram, 2000);
 
 // Routes
 app.get('/api/qr', (_req, res) => {
@@ -178,7 +249,7 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
         console.log(`   WhatsApp: ${isConnected() ? '✅ Connected' : '⏳ Waiting for scan...'}`);
         console.log(`   AI (Gemini): ${config.isAiReady() ? '✅ Ready' : '⏳ Not configured'}`);
         console.log(`   Database (Neon): ${config.isDbReady() ? '✅ Ready' : '⏳ Not configured'}`);
-        console.log(`   Telegram: ${config.isTelegramReady() ? '✅ Ready' : '⏳ Not configured'}`);
+        console.log(`   Telegram: ${config.isTelegramReady() ? '✅ Ready (polling commands)' : '⏳ Not configured'}`);
         console.log(`   Busy Mode: ${config.busyMode ? 'ON (Mahir auto-replies)' : 'OFF'}`);
         console.log(`\n   QR Code: GET /api/qr`);
         console.log(`   Dashboard: GET /\n`);
