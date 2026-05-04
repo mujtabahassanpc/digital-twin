@@ -221,18 +221,24 @@ RULES:
 ${senderName ? `Talking to: ${senderName}` : ''}${contextInstructions}${flowInstruction}`;
 }
 
-// Gemini API key rotation
-let currentKeyIndex = 0;
+// Multi-provider API key management
+let currentGeminiKeyIndex = 0;
 let ai: GoogleGenAI | null = null;
+let currentMistralKeyIndex = 0;
+let mistralExhaustedUntil = 0;
+let geminiExhaustedUntil = 0;
 
-function getAvailableKeys(): string[] {
-  const allKeys = config.getGeminiKeys();
-  return allKeys;
+function getAvailableGeminiKeys(): string[] {
+  return config.getGeminiKeys();
 }
 
-function getAI(): GoogleGenAI {
+function getAvailableMistralKeys(): string[] {
+  return config.getMistralKeys();
+}
+
+function getGeminiAI(): GoogleGenAI {
   if (!ai) {
-    const keys = getAvailableKeys();
+    const keys = getAvailableGeminiKeys();
     if (keys.length === 0) {
       throw new Error('No Gemini API keys configured');
     }
@@ -241,14 +247,54 @@ function getAI(): GoogleGenAI {
   return ai;
 }
 
-function rotateAIKey() {
-  const keys = getAvailableKeys();
-  if (keys.length <= 1) return; // No other keys to rotate to
-
-  currentKeyIndex = (currentKeyIndex + 1) % keys.length;
-  ai = new GoogleGenAI({ apiKey: keys[currentKeyIndex] });
-  console.log(`🔄 Rotated to Gemini API key #${currentKeyIndex + 1}/${keys.length}`);
+function rotateGeminiKey() {
+  const keys = getAvailableGeminiKeys();
+  if (keys.length <= 1) return;
+  currentGeminiKeyIndex = (currentGeminiKeyIndex + 1) % keys.length;
+  ai = new GoogleGenAI({ apiKey: keys[currentGeminiKeyIndex] });
+  console.log(`🔄 Rotated to Gemini key #${currentGeminiKeyIndex + 1}/${keys.length}`);
 }
+
+// Mistral API call via fetch (no extra dependency needed)
+async function callMistral(systemPrompt: string, fullPrompt: string): Promise<string> {
+  const keys = getAvailableMistralKeys();
+  if (keys.length === 0) throw new Error('No Mistral keys configured');
+
+  const key = keys[currentMistralKeyIndex];
+  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model: 'mistral-small-latest',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: fullPrompt },
+      ],
+      temperature: 0.85,
+      top_p: 0.9,
+      max_tokens: 500,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Mistral ${res.status}: ${body}`);
+  }
+
+  const data = await res.json();
+  return data.choices[0].message.content;
+}
+
+function rotateMistralKey() {
+  const keys = getAvailableMistralKeys();
+  if (keys.length <= 1) return;
+  currentMistralKeyIndex = (currentMistralKeyIndex + 1) % keys.length;
+  console.log(`🔄 Rotated to Mistral key #${currentMistralKeyIndex + 1}/${keys.length}`);
+}
+
 
 export interface ConversationEntry {
   role: 'user' | 'assistant';
@@ -272,45 +318,22 @@ export async function generateReply(
 
   const messageContext = classifyMessage(senderMessage);
 
-  // If Gemini is rate limited, skip the call entirely and use natural fallback
-  if (Date.now() < geminiRateLimitedUntil) {
-    console.log('⏳ Gemini still rate limited — using natural fallback');
-    const naturalFallbacks = [
-      'kamon asos? 😊',
-      'kita ba bala ni?',
-      'oy, bala ni?',
-      'sab thik hai?',
-      'kamon aas? ❤️',
-      'kita kbr?',
-      'acha achi kotha bol 😄',
-      'haan bol, muji shuni ase',
-    ];
-    const used = recentReplies[senderId || 'unknown']?.slice(-3) || [];
-    const available = naturalFallbacks.filter((f) => !used.includes(f));
-    const pool = available.length > 0 ? available : naturalFallbacks;
-    const fallback = pool[Math.floor(Math.random() * pool.length)];
-
-    if (!recentReplies[senderId || 'unknown']) {
-      recentReplies[senderId || 'unknown'] = [];
-    }
-    recentReplies[senderId || 'unknown'].push(fallback);
-
-    return {
-      text: fallback,
-      metadata: {
-        typingDelay: 1500 + Math.random() * 2000,
-        isImportant: false,
-      },
-    };
+  // If all providers exhausted, use natural fallback
+  const allExhausted = Date.now() < geminiExhaustedUntil && Date.now() < mistralExhaustedUntil;
+  if (allExhausted) {
+    console.log('⏳ All AI providers exhausted — using natural fallback');
+    return getNaturalFallback(senderId);
   }
 
-  // Skip Gemini for simple greetings to conserve quota (especially after hitting rate limit)
+  // If Gemini exhausted but Mistral available, skip to Mistral
+  const geminiExhausted = Date.now() < geminiExhaustedUntil;
+
+  // Skip AI for simple greetings to conserve quota
   const trimmed = senderMessage.trim().toLowerCase();
   const greetingPatterns = [/^hi$/, /^hello$/, /^hey$/, /^oy$/, /^salam$/, /^wsalam$/, /^hlo$/, /^hlw$/, /^sup$/, /^yo$/, /^👋$/, /^😊$/, /^😂$/, /^❤️$/];
   const isSimpleGreeting = greetingPatterns.some((p) => p.test(trimmed));
 
-  const isQuotaConserving = Date.now() < geminiRateLimitedUntil + 300_000; // 5 min after rate limit hit
-  if (isSimpleGreeting && isQuotaConserving) {
+  if (isSimpleGreeting && (geminiExhausted || Date.now() < geminiExhaustedUntil + 300_000)) {
     const greetingResponses = [
       'oy, kamon asos?',
       'wswk, kamon aas? 😊',
@@ -319,12 +342,7 @@ export async function generateReply(
       'oy bhai, kamon asos?',
     ];
     const reply = greetingResponses[Math.floor(Math.random() * greetingResponses.length)];
-
-    if (!recentReplies[senderId || 'unknown']) {
-      recentReplies[senderId || 'unknown'] = [];
-    }
-    recentReplies[senderId || 'unknown'].push(reply);
-
+    trackReply(senderId, reply);
     return {
       text: reply,
       metadata: {
@@ -348,152 +366,128 @@ export async function generateReply(
 
   const fullPrompt = `${systemPrompt}${historyText}\n\n${senderName || 'Friend'}'s MESSAGE:\n${senderMessage}\n\nYour reply:`;
 
-  try {
-    const response = await getAI().models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: fullPrompt,
-      config: {
-        temperature: 0.85,
-        topP: 0.9,
-        maxOutputTokens: 500,
-      },
-    });
-
-    let reply = response.text?.trim() || '';
-
-    // Clean up prefixes
-    reply = reply.replace(/^(Mahir:|Abher:|Reply:|"|')/gi, '').trim();
-    reply = reply.replace(/^["']|["']$/g, '').trim();
-
-    // Check if AI is deflecting again (detect deflection patterns)
-    const deflectPatterns = ['puchke batata hu', 'yaad nhi hai', 'pore bolbo', 'acha bolbo', 'muje nahi pata', 'me nahi jaanta'];
-    const isDeflecting = deflectPatterns.some((p) => reply.toLowerCase().includes(p));
-
-    if (isDeflecting) {
-      // Check recent replies for this sender
-      if (!recentReplies[senderId || 'unknown']) {
-        recentReplies[senderId || 'unknown'] = [];
-      }
-      const recentForSender = recentReplies[senderId || 'unknown'].slice(-3);
-      const alreadyDeflected = recentForSender.some((r) => deflectPatterns.some((p) => r.toLowerCase().includes(p)));
-
-      if (alreadyDeflected) {
-        // Don't let it deflect again — force a real reply
-        console.log('⚠️ AI tried to deflect again — forcing natural reply');
-        const followUpPrompts = [
-          'kita ba bala ni? 😊',
-          'kamon asos?',
-          'bala ni? kbr?',
-          'oy, kamon asos?',
-          'sab thik hai?',
-        ];
-        reply = followUpPrompts[Math.floor(Math.random() * followUpPrompts.length)];
+  // Try Gemini first
+  if (!geminiExhausted && getAvailableGeminiKeys().length > 0) {
+    try {
+      const reply = await tryGemini(fullPrompt, senderId, messageContext, style);
+      if (reply) return reply;
+    } catch (err: any) {
+      const errMsg = err?.message || '';
+      const is429 = errMsg.includes('429') || errMsg.includes('quota') || errMsg.includes('RESOURCE_EXHAUSTED');
+      if (is429) {
+        console.log('🔑 Gemini 429 — trying Mistral fallback...');
+        geminiExhaustedUntil = Date.now() + 300_000; // 5 min cooldown
       }
     }
-
-    // Track this reply
-    if (!recentReplies[senderId || 'unknown']) {
-      recentReplies[senderId || 'unknown'] = [];
-    }
-    recentReplies[senderId || 'unknown'].push(reply);
-    // Keep only last 10
-    if (recentReplies[senderId || 'unknown'].length > 10) {
-      recentReplies[senderId || 'unknown'] = recentReplies[senderId || 'unknown'].slice(-10);
-    }
-
-    // If reply is too short, use rotating deflection
-    if (reply.length < 3) {
-      reply = getNextDeflection(senderId || 'unknown', style);
-    }
-
-    const typingDelay = getTypingDelay(reply.length, messageContext.urgency);
-
-    return {
-      text: reply,
-      metadata: {
-        typingDelay,
-        isImportant: messageContext.urgency >= 7,
-      },
-    };
-  } catch (error: any) {
-    console.error('Gemini API error:', error);
-
-    const errorMessage = error?.message || '';
-    const isRateLimited = errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('RESOURCE_EXHAUSTED');
-
-    if (isRateLimited) {
-      const keys = getAvailableKeys();
-      if (keys.length > 1) {
-        // Try rotating to next key and retry once
-        rotateAIKey();
-        try {
-          const response = await getAI().models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: fullPrompt,
-            config: {
-              temperature: 0.85,
-              topP: 0.9,
-              maxOutputTokens: 500,
-            },
-          });
-
-          let reply = response.text?.trim() || '';
-          reply = reply.replace(/^(Mahir:|Abher:|Reply:|"|')/gi, '').trim();
-          reply = reply.replace(/^["']|["']$/g, '').trim();
-
-          if (reply.length < 3) {
-            reply = getNextDeflection(senderId || 'unknown', style);
-          }
-
-          const typingDelay = getTypingDelay(reply.length, messageContext.urgency);
-          return {
-            text: reply,
-            metadata: {
-              typingDelay,
-              isImportant: messageContext.urgency >= 7,
-            },
-          };
-        } catch (retryError: any) {
-          console.error('Gemini retry also failed:', retryError);
-          // All keys exhausted — fall through to natural fallback
-        }
-      }
-
-      geminiRateLimitedUntil = Date.now() + 60_000;
-      console.log('⏳ All Gemini keys exhausted — using natural fallback for 60s');
-    }
-
-    // Don't use deflections — use natural conversation continuations instead
-    const naturalFallbacks = [
-      'kamon asos? 😊',
-      'kita ba bala ni?',
-      'oy, bala ni?',
-      'sab thik hai?',
-      'kamon aas? ❤️',
-      'kita kbr?',
-      'acha achi kotha bol 😄',
-      'haan bol, muji shuni ase',
-    ];
-
-    // Pick one not recently used for this sender
-    const used = recentReplies[senderId || 'unknown']?.slice(-3) || [];
-    const available = naturalFallbacks.filter((f) => !used.includes(f));
-    const pool = available.length > 0 ? available : naturalFallbacks;
-    const fallback = pool[Math.floor(Math.random() * pool.length)];
-
-    if (!recentReplies[senderId || 'unknown']) {
-      recentReplies[senderId || 'unknown'] = [];
-    }
-    recentReplies[senderId || 'unknown'].push(fallback);
-
-    return {
-      text: fallback,
-      metadata: {
-        typingDelay: 1500 + Math.random() * 2000,
-        isImportant: false,
-      },
-    };
   }
+
+  // Fallback to Mistral
+  if (getAvailableMistralKeys().length > 0) {
+    try {
+      const reply = await tryMistral(systemPrompt, fullPrompt, senderId, messageContext, style);
+      if (reply) return reply;
+    } catch (err: any) {
+      const errMsg = err?.message || '';
+      const is429 = errMsg.includes('429') || errMsg.includes('quota') || errMsg.includes('RESOURCE_EXHAUSTED');
+      if (is429) {
+        console.log('🔑 Mistral 429 — all providers exhausted');
+        mistralExhaustedUntil = Date.now() + 300_000;
+      }
+    }
+  }
+
+  // Last resort: natural fallback
+  console.log('⏳ All AI providers failed — natural fallback');
+  return getNaturalFallback(senderId);
 }
 
-export { getNextDeflection, loadGuide };
+// Helper: Try Gemini API
+async function tryGemini(
+  fullPrompt: string,
+  senderId: string | undefined,
+  messageContext: { urgency: number },
+  style: any
+): Promise<{ text: string; metadata: ReplyMetadata } | null> {
+  const response = await getGeminiAI().models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: fullPrompt,
+    config: { temperature: 0.85, topP: 0.9, maxOutputTokens: 500 },
+  });
+
+  let reply = response.text?.trim() || '';
+  reply = reply.replace(/^(Mahir:|Abher:|Reply:|"|')/gi, '').trim();
+  reply = reply.replace(/^["']|["']$/g, '').trim();
+
+  if (isDeflection(reply) && hasDeflectedRecently(senderId)) {
+    console.log('⚠️ Gemini deflecting again — forcing natural reply');
+    reply = getRandomFollowUp();
+  }
+
+  if (reply.length < 3) reply = getNextDeflection(senderId || 'unknown', style);
+  trackReply(senderId, reply);
+
+  return { text: reply, metadata: { typingDelay: getTypingDelay(reply.length, messageContext.urgency), isImportant: messageContext.urgency >= 7 } };
+}
+
+// Helper: Try Mistral API
+async function tryMistral(
+  systemPrompt: string,
+  fullPrompt: string,
+  senderId: string | undefined,
+  messageContext: { urgency: number },
+  style: any
+): Promise<{ text: string; metadata: ReplyMetadata } | null> {
+  const reply = await callMistral(systemPrompt, fullPrompt);
+  const cleaned = reply.replace(/^(Mahir:|Abher:|Reply:|"|')/gi, '').trim().replace(/^["']|["']$/g, '').trim();
+
+  if (isDeflection(cleaned) && hasDeflectedRecently(senderId)) {
+    console.log('⚠️ Mistral deflecting again — forcing natural reply');
+    const finalReply = getRandomFollowUp();
+    trackReply(senderId, finalReply);
+    return { text: finalReply, metadata: { typingDelay: getTypingDelay(finalReply.length, messageContext.urgency), isImportant: messageContext.urgency >= 7 } };
+  }
+
+  const finalReply = cleaned.length < 3 ? getNextDeflection(senderId || 'unknown', style) : cleaned;
+  trackReply(senderId, finalReply);
+
+  console.log('✅ Mistral reply successful');
+  return { text: finalReply, metadata: { typingDelay: getTypingDelay(finalReply.length, messageContext.urgency), isImportant: messageContext.urgency >= 7 } };
+}
+
+// Helpers
+function isDeflection(text: string): boolean {
+  const patterns = ['puchke batata hu', 'yaad nhi hai', 'pore bolbo', 'acha bolbo', 'muje nahi pata', 'me nahi jaanta'];
+  return patterns.some((p) => text.toLowerCase().includes(p));
+}
+
+function hasDeflectedRecently(senderId: string | undefined): boolean {
+  const recent = recentReplies[senderId || 'unknown']?.slice(-3) || [];
+  return recent.some((r) => isDeflection(r));
+}
+
+function getRandomFollowUp(): string {
+  const prompts = ['kita ba bala ni? 😊', 'kamon asos?', 'bala ni? kbr?', 'oy, kamon asos?', 'sab thik hai?'];
+  return prompts[Math.floor(Math.random() * prompts.length)];
+}
+
+function trackReply(senderId: string | undefined, reply: string) {
+  const key = senderId || 'unknown';
+  if (!recentReplies[key]) recentReplies[key] = [];
+  recentReplies[key].push(reply);
+  if (recentReplies[key].length > 10) recentReplies[key] = recentReplies[key].slice(-10);
+}
+
+function getNaturalFallback(senderId: string | undefined): { text: string; metadata: ReplyMetadata } {
+  const fallbacks = [
+    'kamon asos? 😊', 'kita ba bala ni?', 'oy, bala ni?', 'sab thik hai?',
+    'kamon aas? ❤️', 'kita kbr?', 'acha achi kotha bol 😄', 'haan bol, muji shuni ase',
+  ];
+  const used = recentReplies[senderId || 'unknown']?.slice(-3) || [];
+  const available = fallbacks.filter((f) => !used.includes(f));
+  const pool = available.length > 0 ? available : fallbacks;
+  const reply = pool[Math.floor(Math.random() * pool.length)];
+  trackReply(senderId, reply);
+  return { text: reply, metadata: { typingDelay: 1500 + Math.random() * 2000, isImportant: false } };
+}
+
+export { getNextDeflection, loadGuide, rotateGeminiKey, rotateMistralKey };

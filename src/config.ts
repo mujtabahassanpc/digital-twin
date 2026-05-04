@@ -25,6 +25,13 @@ export const config = {
     .map((k) => k.trim())
     .filter((k) => k.length > 0),
 
+  // Mistral AI keys pool (comma-separated)
+  // Format: MISTRAL_API_KEYS=key1,key2,key3
+  mistralApiKeys: optionalEnv('MISTRAL_API_KEYS', '')
+    .split(',')
+    .map((k) => k.trim())
+    .filter((k) => k.length > 0),
+
   // Neon Database
   databaseUrl: optionalEnv('DATABASE_URL', ''),
 
@@ -38,7 +45,7 @@ export const config = {
 
   // Feature flags
   isAiReady(): boolean {
-    return this.getGeminiKeys().length > 0;
+    return this.getGeminiKeys().length > 0 || this.getMistralKeys().length > 0;
   },
 
   // Get all active Gemini keys (prioritizes pool over single key)
@@ -46,6 +53,11 @@ export const config = {
     if (this.geminiApiKeys.length > 0) return this.geminiApiKeys;
     if (this.geminiApiKey) return [this.geminiApiKey];
     return [];
+  },
+
+  // Get all Mistral keys
+  getMistralKeys(): string[] {
+    return this.mistralApiKeys;
   },
 
   isDbReady(): boolean {
