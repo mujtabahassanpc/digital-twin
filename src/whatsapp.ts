@@ -4,6 +4,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   WASocket,
   BaileysEventMap,
+  makeCacheableSignalKeyStore,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { EventEmitter } from 'events';
@@ -12,9 +13,15 @@ import QRCode from 'qrcode';
 import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import NodeCache from 'node-cache';
+import fs from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const authDir = path.join(__dirname, '..', 'auth_info_baileys');
+
+// Ensure directory exists (for local/dev)
+if (!fs.existsSync(authDir)) {
+  fs.mkdirSync(authDir, { recursive: true });
+}
 
 const msgRetryCounterCache = new NodeCache();
 
@@ -32,20 +39,25 @@ export async function startWhatsApp() {
     version,
     logger: pino({ level: 'silent' }),
     auth: state,
-    printQRInTerminal: true,
     msgRetryCounterCache,
+    browser: ['Mahir (Mujtaba)', 'Chrome', '3.0'],
   });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
     if (qr) {
-      currentQR = await QRCode.toDataURL(qr);
-      whatsappEmitter.emit('qr-updated', currentQR);
+      try {
+        currentQR = await QRCode.toDataURL(qr);
+        whatsappEmitter.emit('qr-updated', currentQR);
+      } catch (e) {
+        console.error('QR generation error:', e);
+      }
     }
     if (connection === 'close') {
       const shouldReconnect =
         (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
       console.log('Connection closed due to ', lastDisconnect?.error, ', reconnecting ', shouldReconnect);
+      isReady = false;
       if (shouldReconnect) {
         setTimeout(() => startWhatsApp(), 2000);
       }
