@@ -3,8 +3,6 @@ import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   WASocket,
-  BaileysEventMap,
-  makeCacheableSignalKeyStore,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { EventEmitter } from 'events';
@@ -18,7 +16,6 @@ import fs from 'fs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const authDir = path.join(__dirname, '..', 'auth_info_baileys');
 
-// Ensure directory exists (for local/dev)
 if (!fs.existsSync(authDir)) {
   fs.mkdirSync(authDir, { recursive: true });
 }
@@ -28,6 +25,8 @@ const msgRetryCounterCache = new NodeCache();
 let sock: ReturnType<typeof makeWASocket> | null = null;
 let currentQR: string | null = null;
 let isReady = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_DELAY = 60000; // 60s max
 
 export const whatsappEmitter = new EventEmitter();
 
@@ -54,17 +53,31 @@ export async function startWhatsApp() {
       }
     }
     if (connection === 'close') {
-      const shouldReconnect =
-        (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log('Connection closed due to ', lastDisconnect?.error, ', reconnecting ', shouldReconnect);
+      const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+      const wasLoggedOut = statusCode === DisconnectReason.loggedOut;
+      const wasStreamError = statusCode === 515;
+
+      console.log(`⚠️ WhatsApp disconnected (code: ${statusCode}), logged out: ${wasLoggedOut}`);
       isReady = false;
-      if (shouldReconnect) {
-        setTimeout(() => startWhatsApp(), 2000);
+      currentQR = null;
+
+      if (wasLoggedOut) {
+        console.log('🔑 Logged out — need to re-scan QR code');
+        // Auth state is cleared by useMultiFileAuthState, restart fresh
+        reconnectAttempts = 0;
+        setTimeout(() => startWhatsApp(), 3000);
+      } else {
+        // Exponential backoff for reconnect
+        reconnectAttempts++;
+        const delay = Math.min(2000 * reconnectAttempts, MAX_RECONNECT_DELAY);
+        console.log(`🔄 Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts})`);
+        setTimeout(() => startWhatsApp(), delay);
       }
     } else if (connection === 'open') {
       console.log('✅ WhatsApp Connected!');
       isReady = true;
       currentQR = null;
+      reconnectAttempts = 0;
       whatsappEmitter.emit('connected');
     }
   });
@@ -74,7 +87,7 @@ export async function startWhatsApp() {
   sock.ev.on('messages.upsert', async (m) => {
     const msg = m.messages[0];
     if (!msg.message || msg.key.fromMe) return;
-    
+
     const senderId = msg.key.remoteJid!;
     const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
     const senderName = msg.pushName || 'Unknown';
@@ -97,4 +110,8 @@ export function getQRCode() {
 
 export function isConnected() {
   return isReady;
+}
+
+export function getReconnectAttempts() {
+  return reconnectAttempts;
 }

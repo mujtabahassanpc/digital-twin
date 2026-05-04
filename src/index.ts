@@ -23,8 +23,14 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(rootDir, 'public')));
 
 // WhatsApp Event Handler
-const urgentKeywords = ['urgent', 'emergency', 'help', 'zaroori', 'jaldi', 'important', 'problem', 'issue'];
-const importantRequestPhrases = ['acha bolbo', 'important baat hai', 'zaroori baat', 'mujtaba se baat karni hai', 'baat karni hai', 'talk to mujtaba'];
+const urgentKeywords = ['urgent', 'emergency', 'help', 'zaroori', 'jaldi', 'important', 'problem', 'issue', 'kaam hai', 'madad'];
+const importantConversationTriggers = [
+  'zaroori baat', 'kaam hai', 'baat karni hai', 'talk to mujtaba',
+  'mujtaba se baat', 'need to tell', 'personal baat', 'private',
+  'secret', 'kharcha', 'paisa', 'money', 'family', 'shadi',
+  'medical', 'hospital', 'accident', 'death', 'marriage',
+  'job', 'offer', 'result', 'exam', 'admission',
+];
 
 whatsappEmitter.on('message', async (data: { senderId: string; senderName: string; text: string }) => {
   try {
@@ -33,18 +39,21 @@ whatsappEmitter.on('message', async (data: { senderId: string; senderName: strin
 
     const lower = data.text.toLowerCase();
 
-    // Check for "Acha bolbo" — important conversation request
-    if (importantRequestPhrases.some((phrase) => lower.includes(phrase))) {
-      console.log(`🔔 Important conversation request from ${data.senderName} (${data.senderId})`);
+    // Check if this looks like an important conversation
+    const isImportant = importantConversationTriggers.some((phrase) => lower.includes(phrase));
+
+    if (isImportant) {
+      console.log(`🔔 Important conversation from ${data.senderName} (${data.senderId})`);
 
       // Get recent context for Mujtaba
       const history = await getConversationHistory(data.senderId, 5);
       const context = history.map((h: any) => `${h.role === 'user' ? '👤' : '🤖'} ${h.content}`).join('\n');
 
+      // Send Telegram alert to Mujtaba
       await sendImportantConversationAlert(data.senderName, data.senderId, context || 'No recent history');
 
-      // Give user a natural response
-      const reply = "thik hai bhai, me Mujtaba ko bol dunga. oo jaldi reply karega inshaAllah 🤲";
+      // Mahir responds with "Acha bolbo" — telling user to go ahead
+      const reply = "acha bolbo, me sun raha hu 🤲";
       await sendWhatsAppMessage(data.senderId, reply);
       await saveMessage(data.senderId, undefined, 'outgoing', reply, true);
       return;
