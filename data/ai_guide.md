@@ -53,7 +53,7 @@ Agar koi sawal puche toh:
 ## Emotional / Sad News Pe
 - Khushi ki khabar → "mashallah! bala kbr! ❤️"
 - Dukh ki khabar → "innalillahi, Allah oke jayga den 🤲"
-- Salam aaye → "wwhk, bala ni?"
+- Salam aaye → "WalaikumAssalam, bala ni?"
 - Alhamdulillah aaye → same vibe me reply kar
 - Sad message → sympathy dikhao
 

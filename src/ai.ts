@@ -12,6 +12,8 @@ const styleProfilePath = path.join(__dirname, '..', 'data', 'style_profile.json'
 const recentReplies: Record<string, string[]> = {};
 // Track deflection usage per sender
 const deflectionHistory: Record<string, string[]> = {};
+// Track Gemini rate limit (429) cooldown
+let geminiRateLimitedUntil = 0;
 
 function loadGuide(): string {
   try {
@@ -157,72 +159,66 @@ function buildSystemPrompt(senderName?: string, messageContext?: { type: string;
   const guide = loadGuide();
   const timeContext = getCurrentTimeContext();
 
-  // Analyze conversation flow to give context-aware instructions
   let flowInstruction = '';
 
   if (conversationHistory && conversationHistory.length > 0) {
     const lastFew = conversationHistory.slice(-4);
     const lastAiReplies = lastFew.filter((e: any) => e.role === 'assistant').map((e: any) => e.content);
 
-    // Check if we've been deflecting too much
     const deflectWords = ['puchke', 'yaad nhi', 'pore bolbo', 'acha bolbo', 'muje nahi pata'];
     const recentDeflections = lastAiReplies.filter((r: string) =>
       deflectWords.some((w) => r.toLowerCase().includes(w))
     ).length;
 
     if (recentDeflections >= 2) {
-      flowInstruction = `\n\n⚠️ CRITICAL: You have been deflecting too much in this conversation. DO NOT deflect again. You MUST give a real response. Continue the conversation naturally.`;
+      flowInstruction = `\n\n⚠️ CRITICAL: You have been deflecting too much. DO NOT deflect again. Give a real, natural response.`;
     }
 
-    // Check if the last AI message was very short
     const lastReply = lastAiReplies[lastAiReplies.length - 1] || '';
     if (lastReply.length < 10) {
-      flowInstruction += `\nYour last reply was very short. This time, say something more substantial.`;
+      flowInstruction += `\nYour last reply was very short. This time, say something more.`;
     }
   }
 
   let contextInstructions = '';
 
   if (messageContext) {
-    const { type, urgency } = messageContext;
+    const { type } = messageContext;
 
     if (type === 'greeting') {
-      contextInstructions = `\n\nCURRENT CONTEXT: This is a GREETING. Reply warmly in Sylheti. Ask how they are doing. Keep it very short.`;
+      contextInstructions = `\n\nCONTEXT: Greeting. Reply warmly in Sylheti. Ask how they are. Keep it very short.`;
     } else if (type === 'question') {
-      contextInstructions = `\n\nCURRENT CONTEXT: They asked a QUESTION. Answer it naturally. If you don't know, deflect ONCE — then ask a follow-up question to keep the conversation going.`;
+      contextInstructions = `\n\nCONTEXT: They asked a question. Answer naturally. If unsure, deflect ONCE then ask follow-up.`;
     } else if (type === 'sad') {
-      contextInstructions = `\n\nCURRENT CONTEXT: This is SAD news. Show sympathy. Use "innalillahi" or similar. Be warm and caring.`;
+      contextInstructions = `\n\nCONTEXT: Sad news. Show sympathy. Use "innalillahi". Be warm.`;
     } else if (type === 'happy') {
-      contextInstructions = `\n\nCURRENT CONTEXT: This is HAPPY news! Respond with excitement. Use "mashallah" or "alhamdulillah".`;
-    } else if (type === 'urgent') {
-      contextInstructions = `\n\nCURRENT CONTEXT: This is URGENT. Reply quickly and directly. Say "acha bolbo" and let Mujtaba know via Telegram.`;
-    } else if (type === 'important') {
-      contextInstructions = `\n\nCURRENT CONTEXT: This seems IMPORTANT. Say "acha bolbo" to encourage them. Alert Mujtaba via Telegram.`;
+      contextInstructions = `\n\nCONTEXT: Happy news! Be excited. Use "mashallah" or "alhamdulillah".`;
+    } else if (type === 'urgent' || type === 'important') {
+      contextInstructions = `\n\nCONTEXT: Important/Urgent. Say "acha bolbo" and alert Mujtaba via Telegram.`;
     } else if (type === 'emotional') {
-      contextInstructions = `\n\nCURRENT CONTEXT: This is an EMOTIONAL message. Match their energy. Be warm and natural.`;
+      contextInstructions = `\n\nCONTEXT: Emotional message. Match their energy. Be warm.`;
     } else {
-      contextInstructions = `\n\nCURRENT CONTEXT: This is a normal conversation message. Reply naturally. If the conversation is dying, ask a follow-up question to keep it going.`;
+      contextInstructions = `\n\nCONTEXT: Normal chat. Reply naturally. Keep conversation alive.`;
     }
 
-    contextInstructions += `\nTime: ${timeContext}. Adjust tone accordingly.`;
+    contextInstructions += `\nTime: ${timeContext}.`;
   }
 
-  const guideContext = guide ? `\n\nYOUR COMPLETE GUIDE — FOLLOW IT:\n\n${guide}` : '';
+  const guideContext = guide ? `\n\nYOUR GUIDE — FOLLOW IT:\n\n${guide}` : '';
 
-  return `You are Mahir Abher, Mujtaba's brother. You handle his WhatsApp when he's busy.${guideContext}
+  return `You are Mahir Abher, Mujtaba's brother.${guideContext}
 
 RULES:
-1. Respond ONLY with the reply text — no explanations, no prefixes, no quotes
+1. Reply ONLY with the message text — no explanations, no prefixes
 2. Be a real Sylheti young man texting — natural, casual, warm
-3. NEVER repeat the same reply you just gave
-4. NEVER deflect more than once in a conversation
-5. ALWAYS try to continue the conversation — ask follow-up questions
-6. Match the energy and topic of what the person said
+3. NEVER repeat the same reply
+4. NEVER deflect more than once in a row
+5. ALWAYS continue the conversation — ask follow-up questions
+6. NEVER explain who you are unless they explicitly ask "who is this?"
 7. Use Sylheti words naturally
-8. Complete your thought — don't cut off mid-sentence
-9. No corporate language, no AI talk, no robotic phrases
+8. No corporate language, no AI talk
 
-${senderName ? `You are talking to: ${senderName}` : ''}${contextInstructions}${flowInstruction}`;
+${senderName ? `Talking to: ${senderName}` : ''}${contextInstructions}${flowInstruction}`;
 }
 
 let ai: GoogleGenAI | null = null;
@@ -255,6 +251,69 @@ export async function generateReply(
   learnFromMessage(senderMessage);
 
   const messageContext = classifyMessage(senderMessage);
+
+  // If Gemini is rate limited, skip the call entirely and use natural fallback
+  if (Date.now() < geminiRateLimitedUntil) {
+    console.log('⏳ Gemini still rate limited — using natural fallback');
+    const naturalFallbacks = [
+      'kamon asos? 😊',
+      'kita ba bala ni?',
+      'oy, bala ni?',
+      'sab thik hai?',
+      'kamon aas? ❤️',
+      'kita kbr?',
+      'acha achi kotha bol 😄',
+      'haan bol, muji shuni ase',
+    ];
+    const used = recentReplies[senderId || 'unknown']?.slice(-3) || [];
+    const available = naturalFallbacks.filter((f) => !used.includes(f));
+    const pool = available.length > 0 ? available : naturalFallbacks;
+    const fallback = pool[Math.floor(Math.random() * pool.length)];
+
+    if (!recentReplies[senderId || 'unknown']) {
+      recentReplies[senderId || 'unknown'] = [];
+    }
+    recentReplies[senderId || 'unknown'].push(fallback);
+
+    return {
+      text: fallback,
+      metadata: {
+        typingDelay: 1500 + Math.random() * 2000,
+        isImportant: false,
+      },
+    };
+  }
+
+  // Skip Gemini for simple greetings to conserve quota (especially after hitting rate limit)
+  const trimmed = senderMessage.trim().toLowerCase();
+  const greetingPatterns = [/^hi$/, /^hello$/, /^hey$/, /^oy$/, /^salam$/, /^wsalam$/, /^hlo$/, /^hlw$/, /^sup$/, /^yo$/, /^👋$/, /^😊$/, /^😂$/, /^❤️$/];
+  const isSimpleGreeting = greetingPatterns.some((p) => p.test(trimmed));
+
+  const isQuotaConserving = Date.now() < geminiRateLimitedUntil + 300_000; // 5 min after rate limit hit
+  if (isSimpleGreeting && isQuotaConserving) {
+    const greetingResponses = [
+      'oy, kamon asos?',
+      'wswk, kamon aas? 😊',
+      'hey, kita kbr?',
+      'salam! bala ni?',
+      'oy bhai, kamon asos?',
+    ];
+    const reply = greetingResponses[Math.floor(Math.random() * greetingResponses.length)];
+
+    if (!recentReplies[senderId || 'unknown']) {
+      recentReplies[senderId || 'unknown'] = [];
+    }
+    recentReplies[senderId || 'unknown'].push(reply);
+
+    return {
+      text: reply,
+      metadata: {
+        typingDelay: 800 + Math.random() * 1200,
+        isImportant: false,
+      },
+    };
+  }
+
   const systemPrompt = buildSystemPrompt(senderName, messageContext, conversationHistory);
 
   const recentHistory = conversationHistory.slice(-10);
@@ -336,12 +395,44 @@ export async function generateReply(
         isImportant: messageContext.urgency >= 7,
       },
     };
-  } catch (error) {
+  } catch (error: any) {
     console.error('Gemini API error:', error);
+
+    const errorMessage = error?.message || '';
+    const isRateLimited = errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('RESOURCE_EXHAUSTED');
+
+    if (isRateLimited) {
+      geminiRateLimitedUntil = Date.now() + 60_000;
+      console.log('⏳ Gemini rate limited — using natural fallback for 60s');
+    }
+
+    // Don't use deflections — use natural conversation continuations instead
+    const naturalFallbacks = [
+      'kamon asos? 😊',
+      'kita ba bala ni?',
+      'oy, bala ni?',
+      'sab thik hai?',
+      'kamon aas? ❤️',
+      'kita kbr?',
+      'acha achi kotha bol 😄',
+      'haan bol, muji shuni ase',
+    ];
+
+    // Pick one not recently used for this sender
+    const used = recentReplies[senderId || 'unknown']?.slice(-3) || [];
+    const available = naturalFallbacks.filter((f) => !used.includes(f));
+    const pool = available.length > 0 ? available : naturalFallbacks;
+    const fallback = pool[Math.floor(Math.random() * pool.length)];
+
+    if (!recentReplies[senderId || 'unknown']) {
+      recentReplies[senderId || 'unknown'] = [];
+    }
+    recentReplies[senderId || 'unknown'].push(fallback);
+
     return {
-      text: getNextDeflection(senderId || 'unknown', style),
+      text: fallback,
       metadata: {
-        typingDelay: 2000,
+        typingDelay: 1500 + Math.random() * 2000,
         isImportant: false,
       },
     };
