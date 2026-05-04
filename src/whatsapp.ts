@@ -1,108 +1,89 @@
-import { config } from './config.js';
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  makeInMemoryStore,
+  WASocket,
+  BaileysEventMap,
+} from '@whiskeysockets/baileys';
+import { Boom } from '@hapi/boom';
+import { EventEmitter } from 'events';
+import pino from 'pino';
+import QRCode from 'qrcode';
+import path, { dirname } from 'path';
+import { fileURLToPath } from 'url';
 
-const WHATSAPP_API_BASE = 'https://graph.facebook.com/v20.0';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const authDir = path.join(__dirname, '..', 'auth_info_baileys');
 
-interface WhatsAppMessage {
-  messaging_product: 'whatsapp';
-  recipient_type?: string;
-  to: string;
-  type: 'text';
-  text: {
-    body: string;
-    preview_url?: boolean;
-  };
-}
+const store = makeInMemoryStore({ logger: pino().child({ level: 'silent', stream: 'store' }) });
 
-interface WhatsAppResponse {
-  messaging_product: string;
-  contacts: Array<{ input: string; wa_id: string }>;
-  messages: Array<{ id: string }>;
-}
+let sock: ReturnType<typeof makeWASocket> | null = null;
+let currentQR: string | null = null;
+let isReady = false;
 
-export async function sendWhatsAppMessage(
-  recipientPhoneNumber: string,
-  messageBody: string
-): Promise<WhatsAppResponse> {
-  if (!config.isWhatsAppReady()) {
-    console.warn('WhatsApp not configured — message logged only:', {
-      to: recipientPhoneNumber,
-      message: messageBody,
-    });
-    return {
-      messaging_product: 'whatsapp',
-      contacts: [{ input: recipientPhoneNumber, wa_id: recipientPhoneNumber }],
-      messages: [{ id: 'mock-' + Date.now() }],
-    };
-  }
+export const whatsappEmitter = new EventEmitter();
 
-  const message: WhatsAppMessage = {
-    messaging_product: 'whatsapp',
-    to: recipientPhoneNumber,
-    type: 'text',
-    text: {
-      body: messageBody,
-      preview_url: true,
-    },
-  };
+export async function startWhatsApp() {
+  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  const { version } = await fetchLatestBaileysVersion();
 
-  const response = await fetch(
-    `${WHATSAPP_API_BASE}/${config.whatsappPhoneNumberId}/messages`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.whatsappAccessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(message),
+  sock = makeWASocket({
+    version,
+    logger: pino({ level: 'silent' }),
+    auth: state,
+    printQRInTerminal: true,
+  });
+
+  store.bind(sock.ev);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) {
+      currentQR = await QRCode.toDataURL(qr);
+      whatsappEmitter.emit('qr-updated', currentQR);
     }
-  );
+    if (connection === 'close') {
+      const shouldReconnect =
+        (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('Connection closed due to ', lastDisconnect?.error, ', reconnecting ', shouldReconnect);
+      if (shouldReconnect) {
+        setTimeout(() => startWhatsApp(), 2000);
+      }
+    } else if (connection === 'open') {
+      console.log('✅ WhatsApp Connected!');
+      isReady = true;
+      currentQR = null;
+      whatsappEmitter.emit('connected');
+    }
+  });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`WhatsApp API error (${response.status}): ${errorText}`);
-  }
+  sock.ev.on('creds.update', saveCreds);
 
-  return response.json();
+  sock.ev.on('messages.upsert', async (m) => {
+    const msg = m.messages[0];
+    if (!msg.message || msg.key.fromMe) return;
+    
+    const senderId = msg.key.remoteJid!;
+    const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
+    const senderName = msg.pushName || 'Unknown';
+
+    if (text) {
+      console.log(`Message from ${senderName} (${senderId}): ${text}`);
+      whatsappEmitter.emit('message', { senderId, senderName, text });
+    }
+  });
 }
 
-export function verifyWhatsAppWebhook(
-  mode: string,
-  token: string,
-  challenge: string
-): string | null {
-  if (
-    mode === 'subscribe' &&
-    token === config.whatsappVerifyToken
-  ) {
-    return challenge;
-  }
-  return null;
+export async function sendWhatsAppMessage(to: string, text: string) {
+  if (!sock) throw new Error('WhatsApp not started');
+  await sock!.sendMessage(to, { text });
 }
 
-export function parseIncomingWebhook(body: any) {
-  const entry = body.entry?.[0];
-  if (!entry) return null;
+export function getQRCode() {
+  return currentQR;
+}
 
-  const changes = entry.changes?.[0];
-  if (!changes) return null;
-
-  const value = changes.value;
-  const messages = value.messages;
-
-  if (!messages || messages.length === 0) return null;
-
-  const message = messages[0];
-  const senderId = message.from;
-  const senderName = value.contacts?.[0]?.profile?.name;
-  const text = message.text?.body;
-
-  if (!text || !senderId) return null;
-
-  return {
-    senderId,
-    senderName,
-    text,
-    timestamp: message.timestamp || new Date().toISOString(),
-    messageId: message.id,
-  };
+export function isConnected() {
+  return isReady;
 }

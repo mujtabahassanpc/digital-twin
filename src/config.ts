@@ -15,12 +15,6 @@ function optionalEnv(key: string, fallback?: string): string {
 }
 
 export const config = {
-  // WhatsApp Cloud API
-  whatsappPhoneNumberId: optionalEnv('WHATSAPP_PHONE_NUMBER_ID', ''),
-  whatsappAccessToken: optionalEnv('WHATSAPP_ACCESS_TOKEN', ''),
-  whatsappVerifyToken: optionalEnv('WHATSAPP_VERIFY_TOKEN', 'digital-twin-verify'),
-  whatsappBusinessAccountId: optionalEnv('WHATSAPP_BUSINESS_ACCOUNT_ID', ''),
-
   // Gemini AI
   geminiApiKey: optionalEnv('GEMINI_API_KEY', ''),
 
@@ -36,10 +30,6 @@ export const config = {
   telegramChatId: optionalEnv('TELEGRAM_CHAT_ID', ''),
 
   // Feature flags
-  isWhatsAppReady(): boolean {
-    return !!(this.whatsappPhoneNumberId && this.whatsappAccessToken);
-  },
-
   isAiReady(): boolean {
     return !!this.geminiApiKey;
   },

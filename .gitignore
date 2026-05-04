@@ -3,5 +3,6 @@ dist/
 .env
 data/*.json
 *.tsbuildinfo
+auth_info_baileys/
 
 .vercel
