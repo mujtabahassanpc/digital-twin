@@ -111,6 +111,23 @@ function saveContact(senderId: string, info: any) {
 }
 
 // ============================================================
+// SENTIMENT DETECTION (zero-cost, keyword-based)
+// ============================================================
+
+function detectUserSentiment(userMessage: string): string {
+  const lower = userMessage.toLowerCase();
+  if (/\b(sad|dukhi|rona|tension|tens|pareshan|grave|udas|tension me)\b/.test(lower))
+    return 'User seems sad or stressed. Reply with empathy, maybe ask if they want to talk.';
+  if (/\b(angry|gussa|chhod|nafrat|bahut ho gaya|uff|pagal|bewakoof|kutta|kutte)\b/.test(lower))
+    return 'User sounds angry or frustrated. Apologize if appropriate, stay calm.';
+  if (/\b(urgent|emergency|help|jaldi|zaroori|problem|call|madad)\b/.test(lower))
+    return 'This seems urgent. Show concern, ask what they need immediately.';
+  if (/\b(happy|maza|achi|shukriya|thanks|mubarak|alhamdulillah|bala|mast|badhiya)\b/.test(lower))
+    return 'User is in a good mood. Match their positive energy.';
+  return '';
+}
+
+// ============================================================
 // CONVERSATION CONTEXT ANALYSIS
 // Let the AI detect context naturally from history, not hardcoded phrases
 // ============================================================
@@ -127,14 +144,19 @@ function getConversationContext(userMessage: string, history: any[]): string {
   const allShort = recentUser.length >= 2 && recentUser.every((e: any) => e.content.trim().length < 6);
 
   if (isShortResponse && allShort) {
-    return '⚠️ User is giving very short responses — they may want to end the conversation. Keep your reply minimal and do not ask new questions.';
+    return '⚠️ User is giving very short responses — they may want to end the conversation. Keep your reply minimal and do not ask new questions.' + appendSentiment(userMessage);
   }
 
   if (isShortResponse) {
-    return 'User gave a very short response. Match their energy — keep your reply short and natural.';
+    return 'User gave a very short response. Match their energy — keep your reply short and natural.' + appendSentiment(userMessage);
   }
 
-  return 'User is actively engaged. Respond naturally to what they said.';
+  return 'User is actively engaged. Respond naturally to what they said.' + appendSentiment(userMessage);
+}
+
+function appendSentiment(userMessage: string): string {
+  const sentiment = detectUserSentiment(userMessage);
+  return sentiment ? '\n[Emotional context]: ' + sentiment : '';
 }
 
 // ============================================================
@@ -298,7 +320,7 @@ async function callCohere(systemPrompt: string, userMessage: string): Promise<st
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
           body: JSON.stringify({
-            model: 'command-r',
+            model: 'command-r-plus-08-2024',
             message: userMessage,
             preamble: systemPrompt,
             temperature: 0.8,

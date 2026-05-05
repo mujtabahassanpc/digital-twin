@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs';
 import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { config } from './config.js';
@@ -84,6 +85,17 @@ function processBatchedMessage(
       // Generate AI reply with metadata
       const result = await generateReply(combinedText, history, senderName, senderId);
 
+      // --- End Enforcer: Trim reply when user is giving very short responses ---
+      const recentUserMsgs = history.filter(e => e.role === 'user').slice(-3);
+      const allShort = recentUserMsgs.length >= 2 && recentUserMsgs.every(e => e.content.trim().length <= 5);
+      const noQuestion = !recentUserMsgs.some(e => e.content.includes('?'));
+      const replyIsLong = result.text && result.text.split(' ').length > 12;
+
+      if (allShort && noQuestion && replyIsLong) {
+        result.text = result.text.split(' ').slice(0, 12).join(' ').trim() + '.';
+        console.log('✂️ Reply trimmed (end enforcer)');
+      }
+
       // Handle clarification needed — Mahir asks user to rephrase AND tells Mujtaba
       if (result.needsClarification) {
         console.log(`🤔 Mahir confused — asking for clarification from ${senderName}`);
@@ -98,6 +110,25 @@ function processBatchedMessage(
         // Alert Mujtaba on Telegram
         const { sendConfusionAlert } = await import('./telegram.js');
         await sendConfusionAlert(senderName, senderId, combinedText, history);
+
+        // --- Save to learning queue ---
+        const queuePath = path.join(__dirname, '..', 'data', 'learning_queue.json');
+        let queue: any[] = [];
+        try {
+          queue = JSON.parse(fs.readFileSync(queuePath, 'utf-8'));
+        } catch { /* file doesn't exist yet */ }
+        queue.push({
+          timestamp: new Date().toISOString(),
+          senderId,
+          senderName,
+          userMessage: combinedText,
+          context: history.slice(-4).map(h => `${h.role}: ${h.content}`).join('\n'),
+          status: 'new',
+        });
+        if (queue.length > 50) queue = queue.slice(-50);
+        fs.writeFileSync(queuePath, JSON.stringify(queue, null, 2));
+        // --- end learning queue ---
+
         return;
       }
 

@@ -8,6 +8,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const contextPath = path.join(__dirname, '..', 'data', 'context.md');
 const contactsPath = path.join(__dirname, '..', 'data', 'contacts.json');
 const languageExamplesPath = path.join(__dirname, '..', 'data', 'language_examples.json');
+const learningQueuePath = path.join(__dirname, '..', 'data', 'learning_queue.json');
 
 const TELEGRAM_API = 'https://api.telegram.org/bot';
 
@@ -245,6 +246,7 @@ export async function handleTelegramCommand(command: string, args: string): Prom
 <b>/lang [n]</b> — View last n language examples (default: 10)
 <b>/forgetlang [index]</b> — Remove a language example by index
 <b>/clearlang</b> — Remove all language examples
+<b>/review</b> — View messages Mahir didn't understand (learning queue)
 
 <b>👤 Context & Memory:</b>
 <b>/mujtaba [status]</b> — Set Mujtaba's status (busy/available/school/office/sleeping/eating/driving/meeting/travelling)
@@ -549,6 +551,28 @@ export async function handleTelegramCommand(command: string, args: string): Prom
         return sendTelegramMessage('✅ All language examples cleared.');
       } catch {
         return sendTelegramMessage('❌ Failed to clear examples');
+      }
+    }
+
+    case 'review': {
+      if (!fs.existsSync(learningQueuePath)) {
+        return sendTelegramMessage('📚 No learning queue yet.');
+      }
+      try {
+        const queue: any[] = JSON.parse(fs.readFileSync(learningQueuePath, 'utf-8'));
+        const newItems = queue.filter(item => item.status === 'new').slice(-5);
+        if (newItems.length === 0) {
+          return sendTelegramMessage('✅ No pending review items.');
+        }
+        let text = '📚 <b>Items Mahir couldn\'t understand:</b>\n\n';
+        newItems.forEach((item, idx) => {
+          text += `<b>${idx + 1}.</b> <i>${item.senderName}:</i> "${item.userMessage.slice(0, 80)}"\n`;
+          text += `Context: ${item.context.slice(0, 100)}\n\n`;
+        });
+        text += 'Use <code>/teach "message" | reason</code> to teach Mahir, or <code>/reply senderId your_response</code> to reply directly.';
+        return sendTelegramMessage(text);
+      } catch {
+        return sendTelegramMessage('❌ Failed to read learning queue');
       }
     }
 
