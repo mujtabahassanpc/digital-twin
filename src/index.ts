@@ -75,6 +75,13 @@ whatsappEmitter.on('message', async (data: { senderId: string; senderName: strin
 
     // Generate AI reply with metadata
     const result = await generateReply(data.text, history, data.senderName, data.senderId);
+
+    // Skip if no reply (already sent exhausted message)
+    if (!result.text) {
+      console.log(`⏭️ Skipping reply to ${data.senderName} — already sent exhausted message`);
+      return;
+    }
+
     console.log(`💬 AI Reply to ${data.senderName} (${result.metadata.typingDelay}ms delay): ${result.text}`);
 
     // Show typing indicator for realistic delay
