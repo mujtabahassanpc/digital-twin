@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const contextPath = path.join(__dirname, '..', 'data', 'context.md');
 const contactsPath = path.join(__dirname, '..', 'data', 'contacts.json');
+const languageExamplesPath = path.join(__dirname, '..', 'data', 'language_examples.json');
 
 const TELEGRAM_API = 'https://api.telegram.org/bot';
 
@@ -204,16 +205,29 @@ export async function handleTelegramCommand(command: string, args: string): Prom
     case 'help':
       return sendTelegramMessage(`🤖 <b>Mahir Abher — Commands</b>
 
+<b>🔧 Status:</b>
 <b>/status</b> — Check all services
-<b>/contacts [n]</b> — Recent contacts (default: 10)
 <b>/busy on</b> — Enable auto-reply
 <b>/busy off</b> — Disable auto-reply
-<b>/reply [number] [msg]</b> — Send manual reply
 <b>/digest</b> — Send today's summary
-<b>/mujtaba [status]</b> — Set Mujtaba's status (busy/available/school/office/sleeping)
+
+<b>🧠 Teach Mahir Language:</b>
+<b>/teach [message] | [reason]</b> — Add a language example with reason
+  Example: /teach "acha thik hai" | jab conversation end karni ho, short acknowledgment dena
+<b>/teachbulk [msg1 > reason1 :: msg2 > reason2]</b> — Add multiple examples at once
+<b>/lang [n]</b> — View last n language examples (default: 10)
+<b>/forgetlang [index]</b> — Remove a language example by index
+<b>/clearlang</b> — Remove all language examples
+
+<b>👤 Context & Memory:</b>
+<b>/mujtaba [status]</b> — Set Mujtaba's status (busy/available/school/office/sleeping/eating/driving/meeting/travelling)
 <b>/context [text]</b> — Add custom context instruction
 <b>/contacts</b> — View saved contact memories
 <b>/forget [senderId]</b> — Clear contact memory for a person
+
+<b>💬 Reply:</b>
+<b>/reply [number] [msg]</b> — Send manual reply
+
 <b>/help</b> — Show this message
 
 — Mahir Abher`);
@@ -378,6 +392,136 @@ export async function handleTelegramCommand(command: string, args: string): Prom
         return sendTelegramMessage(`❌ Contact not found: ${args}`);
       } catch {
         return sendTelegramMessage('❌ Failed to forget contact');
+      }
+    }
+
+    case 'teach': {
+      // Format: /teach "message" | reason
+      // Or: /teach message | reason
+      const pipeIndex = args.indexOf('|');
+      if (pipeIndex === -1) {
+        return sendTelegramMessage('Usage: /teach "message" | reason\n\nExample: /teach "acha thik hai" | jab conversation end karni ho, short acknowledgment dena');
+      }
+
+      const message = args.substring(0, pipeIndex).trim().replace(/^["']|["']$/g, '');
+      const reason = args.substring(pipeIndex + 1).trim();
+
+      if (!message || !reason) {
+        return sendTelegramMessage('Message aur reason dono chahiye.\nUsage: /teach "message" | reason');
+      }
+
+      try {
+        const data = JSON.parse(fs.readFileSync(languageExamplesPath, 'utf-8'));
+        data.examples.push({
+          message,
+          reason,
+          added_at: new Date().toISOString(),
+        });
+        data.last_updated = new Date().toISOString();
+        fs.writeFileSync(languageExamplesPath, JSON.stringify(data, null, 2));
+
+        return sendTelegramMessage(`✅ Language example added (#${data.examples.length}):\n\n💬 Message: "${message}"\n📝 Reason: ${reason}\n\nMahir ab ye example use karega.`);
+      } catch (err: any) {
+        return sendTelegramMessage(`❌ Failed to add example: ${err.message}`);
+      }
+    }
+
+    case 'teachbulk': {
+      // Format: /teachbulk "msg1" > reason1 :: "msg2" > reason2
+      if (!args.trim()) {
+        return sendTelegramMessage('Usage: /teachbulk "msg1" > reason1 :: "msg2" > reason2');
+      }
+
+      const entries = args.split('::').map(s => s.trim()).filter(s => s.length > 0);
+      const newExamples: any[] = [];
+
+      for (const entry of entries) {
+        const arrowIndex = entry.indexOf('>');
+        if (arrowIndex === -1) continue;
+
+        const message = entry.substring(0, arrowIndex).trim().replace(/^["']|["']$/g, '');
+        const reason = entry.substring(arrowIndex + 1).trim();
+
+        if (message && reason) {
+          newExamples.push({
+            message,
+            reason,
+            added_at: new Date().toISOString(),
+          });
+        }
+      }
+
+      if (newExamples.length === 0) {
+        return sendTelegramMessage('Koi valid example nahi mili. Format: "msg" > reason :: "msg2" > reason2');
+      }
+
+      try {
+        const data = JSON.parse(fs.readFileSync(languageExamplesPath, 'utf-8'));
+        for (const ex of newExamples) {
+          data.examples.push(ex);
+        }
+        data.last_updated = new Date().toISOString();
+        fs.writeFileSync(languageExamplesPath, JSON.stringify(data, null, 2));
+
+        const list = newExamples.map((ex, i) => `${i + 1}. "${ex.message}" — ${ex.reason}`).join('\n');
+        return sendTelegramMessage(`✅ ${newExamples.length} examples added (total: ${data.examples.length}):\n\n${list}`);
+      } catch (err: any) {
+        return sendTelegramMessage(`❌ Failed to add examples: ${err.message}`);
+      }
+    }
+
+    case 'lang': {
+      const limit = parseInt(args) || 10;
+      try {
+        const data = JSON.parse(fs.readFileSync(languageExamplesPath, 'utf-8'));
+        const examples = data.examples || [];
+
+        if (examples.length === 0) {
+          return sendTelegramMessage('📋 Koi language example nahi hai abhi.\n\nUse /teach "message" | reason to add.');
+        }
+
+        const recent = examples.slice(-limit);
+        const list = recent.map((ex: any, i: number) => {
+          const globalIndex = examples.length - limit + i + 1;
+          return `*#${globalIndex}* "${ex.message}"\n   → ${ex.reason}`;
+        }).join('\n\n');
+
+        return sendTelegramMessage(`📋 *Language Examples* (${examples.length} total, showing last ${limit}):\n\n${list}`);
+      } catch {
+        return sendTelegramMessage('📋 Language examples file not found');
+      }
+    }
+
+    case 'forgetlang': {
+      const index = parseInt(args) - 1; // 1-based index
+      if (isNaN(index)) {
+        return sendTelegramMessage('Usage: /forgetlang <index>\n\nUse /lang to see indices.');
+      }
+
+      try {
+        const data = JSON.parse(fs.readFileSync(languageExamplesPath, 'utf-8'));
+        const examples = data.examples || [];
+
+        if (index < 0 || index >= examples.length) {
+          return sendTelegramMessage(`❌ Index ${index + 1} out of range. Total: ${examples.length}`);
+        }
+
+        const removed = examples.splice(index, 1)[0];
+        data.last_updated = new Date().toISOString();
+        fs.writeFileSync(languageExamplesPath, JSON.stringify(data, null, 2));
+
+        return sendTelegramMessage(`✅ Removed example:\n\n"${removed.message}" → ${removed.reason}`);
+      } catch {
+        return sendTelegramMessage('❌ Failed to remove example');
+      }
+    }
+
+    case 'clearlang': {
+      try {
+        fs.writeFileSync(languageExamplesPath, JSON.stringify({ examples: [], last_updated: new Date().toISOString() }, null, 2));
+        return sendTelegramMessage('✅ All language examples cleared.');
+      } catch {
+        return sendTelegramMessage('❌ Failed to clear examples');
       }
     }
 

@@ -9,6 +9,7 @@ const dataDir = path.join(__dirname, '..', 'data');
 const personalityPath = path.join(dataDir, 'personality.md');
 const contextPath = path.join(dataDir, 'context.md');
 const contactsPath = path.join(dataDir, 'contacts.json');
+const languageExamplesPath = path.join(dataDir, 'language_examples.json');
 
 // Per-sender reply tracking
 const recentReplies: Record<string, string[]> = {};
@@ -54,6 +55,26 @@ function loadContacts(): Record<string, any> {
   }
 }
 
+function loadLanguageExamples(): string {
+  try {
+    const raw = fs.readFileSync(languageExamplesPath, 'utf-8');
+    const data = JSON.parse(raw);
+    const examples = data.examples || [];
+    if (examples.length === 0) return '';
+
+    // Format examples for the system prompt
+    let text = 'LANGUAGE EXAMPLES (learned from Mujtaba):\n';
+    // Show last 30 examples (most recent)
+    const recent = examples.slice(-30);
+    for (const ex of recent) {
+      text += `- Message: "${ex.message}"\n  Why: ${ex.reason}\n`;
+    }
+    return text;
+  } catch {
+    return '';
+  }
+}
+
 function saveContact(senderId: string, info: any) {
   const data = loadContacts();
   data.contacts[senderId] = {
@@ -70,37 +91,30 @@ function saveContact(senderId: string, info: any) {
 }
 
 // ============================================================
-// CONVERSATION ENDING DETECTION
+// CONVERSATION CONTEXT ANALYSIS
+// Let the AI detect context naturally from history, not hardcoded phrases
 // ============================================================
 
-function isConversationEnding(userMessage: string, history: any[]): boolean {
+function getConversationContext(userMessage: string, history: any[]): string {
   const lower = userMessage.toLowerCase().trim();
+  const msgLen = userMessage.trim().length;
 
-  // Explicit ending phrases
-  const endingPhrases = [
-    'na kichu na', 'kuch nahi', 'nothing', 'bas itna hi', 'bas',
-    'bye', 'jaata hu', 'chal', 'tata', 'goodbye', 'byee',
-    'thik hai', 'theek hai', 'ok', 'okay', 'achha', 'acha',
-    'hmm', 'mm', 'haan',
-  ];
+  // Check if user's message is very short (likely an ending signal)
+  const isShortResponse = msgLen < 5;
 
-  // If user says any ending phrase
-  if (endingPhrases.some(p => lower.includes(p))) {
-    return true;
+  // Check if conversation has been going on and user is giving short responses
+  const recentUser = history.filter((e: any) => e.role === 'user').slice(-3);
+  const allShort = recentUser.length >= 2 && recentUser.every((e: any) => e.content.trim().length < 6);
+
+  if (isShortResponse && allShort) {
+    return '⚠️ User is giving very short responses — they may want to end the conversation. Keep your reply minimal and do not ask new questions.';
   }
 
-  // If user gives very short response (< 4 chars) AND conversation has been going on
-  if (userMessage.trim().length < 4 && history.length > 4) {
-    return true;
+  if (isShortResponse) {
+    return 'User gave a very short response. Match their energy — keep your reply short and natural.';
   }
 
-  // If last 2 user messages were both short/ending
-  const lastTwoUser = history.filter((e: any) => e.role === 'user').slice(-2);
-  if (lastTwoUser.length === 2 && lastTwoUser.every((e: any) => e.content.trim().length < 8)) {
-    return true;
-  }
-
-  return false;
+  return 'User is actively engaged. Respond naturally to what they said.';
 }
 
 // ============================================================
@@ -111,8 +125,9 @@ function buildSystemPrompt(
   personality: string,
   context: string,
   contactInfo: string,
+  languageExamples: string,
   timeContext: string,
-  isEnding: boolean,
+  conversationContext: string,
   history: any[],
   senderName?: string
 ): string {
@@ -128,30 +143,26 @@ function buildSystemPrompt(
     prompt += `WHAT YOU KNOW ABOUT THIS PERSON:\n${contactInfo}\n\n`;
   }
 
+  // Language examples learned from Mujtaba
+  if (languageExamples) {
+    prompt += `${languageExamples}\n\n`;
+  }
+
   // Time context
   prompt += `Current time: ${timeContext}.\n\n`;
 
-  // CRITICAL: Ending mode instructions
-  if (isEnding) {
-    prompt += `⚠️ CONVERSATION IS ENDING. The user has indicated they have nothing more to say.
-RULES FOR ENDING:
-1. Acknowledge their last message naturally
-2. DO NOT ask any new questions
-3. DO NOT say "kita kbr" or "kamon asos" or "how are you"
-4. Keep it to 1 sentence max
-5. Natural closing like "acha thik hai, Mujtaba ko bol dunga 👍" or "ok, take care"`;
-  } else {
-    prompt += `Conversation is ONGOING. Respond naturally. If user asks a question, answer it. If they share news, react to it.`;
-  }
+  // Conversation context (let AI detect naturally)
+  prompt += `${conversationContext}\n\n`;
 
   // Conversation history
   if (history.length > 0) {
     const recent = history.slice(-8);
-    prompt += `\n\nRECENT CONVERSATION (read carefully to understand context):\n`;
+    prompt += `RECENT CONVERSATION (read carefully to understand context):\n`;
     for (const entry of recent) {
       const speaker = entry.role === 'user' ? (senderName || 'Friend') : 'Mahir';
       prompt += `${speaker}: ${entry.content}\n`;
     }
+    prompt += `\n`;
   }
 
   return prompt;
@@ -381,14 +392,15 @@ export async function generateReply(
   // Reset exhausted flag when providers available
   exhaustedSent[id] = false;
 
-  // Load personality, context, contacts
+  // Load personality, context, contacts, language examples
   const personality = loadPersonality();
   const context = loadContext();
   const contactsData = loadContacts();
   const contactInfo = contactsData.contacts[id] ? JSON.stringify(contactsData.contacts[id], null, 2) : '';
+  const languageExamples = loadLanguageExamples();
 
-  // Detect if conversation is ending
-  const isEnding = isConversationEnding(senderMessage, conversationHistory);
+  // Analyze conversation context naturally (no hardcoded phrases)
+  const conversationContext = getConversationContext(senderMessage, conversationHistory);
 
   // Build system prompt
   const timeContext = getTimeContext();
@@ -396,8 +408,9 @@ export async function generateReply(
     personality,
     context,
     contactInfo,
+    languageExamples,
     timeContext,
-    isEnding,
+    conversationContext,
     conversationHistory,
     senderName
   );
