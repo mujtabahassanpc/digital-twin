@@ -129,6 +129,33 @@ Or use the button below to toggle busy mode.
   return sendTelegramMessage(text, keyboard);
 }
 
+export async function sendConfusionAlert(
+  senderName: string,
+  senderId: string,
+  userMessage: string,
+  history: any[]
+): Promise<boolean> {
+  const recentContext = history.slice(-4).map((h: any) => `${h.role === 'user' ? '👤' : '🤖'} ${h.content}`).join('\n');
+
+  const text = `🤔 <b>Mahir is Confused!</b>
+<b>From:</b> ${senderName} (${senderId})
+<b>User said:</b> "${userMessage}"
+
+<b>Recent context:</b>
+${recentContext || 'No recent history'}
+
+Mahir ne user se kaha: "bhai me samja nhi, ek baar phir se bolna?"
+
+⚡ Tu mujhe bata kya reply dena hai:
+<code>/reply ${senderId} your_response</code>
+
+Ya phir /context file me instruction add kar de jisse Mahir agli baar samajh jaye.
+
+— Mahir Abher`;
+
+  return sendTelegramMessage(text);
+}
+
 export async function sendStatusCommand(): Promise<boolean> {
   const { isConnected } = await import('./whatsapp.js');
   const message = `📊 <b>Mahir Status</b>

@@ -32,69 +32,163 @@ const importantConversationTriggers = [
   'job', 'offer', 'result', 'exam', 'admission',
 ];
 
+// Message batching — wait 3 sec for more messages from same sender
+const messageBuffers: Record<string, { messages: { text: string; timestamp: number }[]; timer: ReturnType<typeof setTimeout> }> = {};
+const BATCH_WINDOW_MS = 3000;
+
+function processBatchedMessage(
+  senderId: string,
+  senderName: string,
+  combinedText: string
+): Promise<void> {
+  return (async () => {
+    try {
+      // Save incoming message (combined)
+      await saveMessage(senderId, senderName, 'incoming', combinedText, false);
+
+      const lower = combinedText.toLowerCase();
+
+      // Check if this looks like an important conversation
+      const isImportant = importantConversationTriggers.some((phrase) => lower.includes(phrase));
+
+      if (isImportant) {
+        console.log(`🔔 Important conversation from ${senderName} (${senderId})`);
+
+        const history = await getConversationHistory(senderId, 5);
+        const context = history.map((h: any) => `${h.role === 'user' ? '👤' : '🤖'} ${h.content}`).join('\n');
+
+        await sendImportantConversationAlert(senderName, senderId, context || 'No recent history');
+
+        await showTyping(senderId, 2000);
+        const reply = 'acha bolbo, me sun raha hu 🤲';
+        await sendWhatsAppMessage(senderId, reply);
+        await saveMessage(senderId, undefined, 'outgoing', reply, true);
+        return;
+      }
+
+      // Telegram instant alert for urgent keywords
+      if (urgentKeywords.some((kw) => lower.includes(kw))) {
+        console.log('🚨 URGENT message detected — sending Telegram alert');
+        await sendInstantAlert(senderName, combinedText, 'Urgent keywords detected');
+      }
+
+      // Check busy mode
+      if (!config.busyMode) {
+        console.log('⏸️ Busy mode OFF — not auto-replying');
+        return;
+      }
+
+      // Get conversation history
+      const history = await getConversationHistory(senderId, 10);
+
+      // Generate AI reply with metadata
+      const result = await generateReply(combinedText, history, senderName, senderId);
+
+      // Handle clarification needed — Mahir asks user to rephrase AND tells Mujtaba
+      if (result.needsClarification) {
+        console.log(`🤔 Mahir confused — asking for clarification from ${senderName}`);
+
+        // Send clarification request to user
+        const clarificationMsg = result.clarificationText || 'bhai me samja nhi, ek baar phir se bolna?';
+        await showTyping(senderId, 1500);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await sendWhatsAppMessage(senderId, clarificationMsg);
+        await saveMessage(senderId, undefined, 'outgoing', clarificationMsg, true);
+
+        // Alert Mujtaba on Telegram
+        const { sendConfusionAlert } = await import('./telegram.js');
+        await sendConfusionAlert(senderName, senderId, combinedText, history);
+        return;
+      }
+
+      // Skip if no reply (already sent exhausted message)
+      if (!result.text) {
+        console.log(`⏭️ Skipping reply to ${senderName} — already sent exhausted message`);
+        return;
+      }
+
+      // Split reply into multiple messages if needed
+      const messages = splitIntoMessages(result.text);
+
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        const delay = i === 0 ? result.metadata.typingDelay : getTypingDelay(msg.length);
+
+        if (i > 0) {
+          // Small pause between messages (human-like)
+          await new Promise((resolve) => setTimeout(resolve, 800 + Math.random() * 1200));
+        }
+
+        await showTyping(senderId, delay);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        await sendWhatsAppMessage(senderId, msg);
+        await saveMessage(senderId, undefined, 'outgoing', msg, true);
+      }
+
+      console.log(`💬 AI Reply to ${senderName} (${messages.length} message(s)): ${result.text.slice(0, 80)}...`);
+    } catch (error) {
+      console.error('Error processing message:', error);
+    }
+  })();
+}
+
+function getTypingDelay(len: number): number {
+  const base = Math.max(600, Math.min(4000, len * 50));
+  return Math.round(base * (0.7 + Math.random() * 0.6));
+}
+
+function splitIntoMessages(text: string): string[] {
+  // If short, just one message
+  if (text.length <= 80) return [text];
+
+  // Split on sentence boundaries (。 ! ? . \n)
+  const sentences = text.split(/([.!?\n]+)/);
+  const chunks: string[] = [];
+  let current = '';
+
+  for (const part of sentences) {
+    if (current.length + part.length > 120 && current.length > 20) {
+      chunks.push(current.trim());
+      current = part;
+    } else {
+      current += part;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+
+  // Cap at 3 messages max — merge extras into last
+  if (chunks.length > 3) {
+    const last = chunks.slice(2).join(' ');
+    chunks.length = 2;
+    chunks.push(last);
+  }
+
+  return chunks.filter(m => m.length > 0);
+}
+
 whatsappEmitter.on('message', async (data: { senderId: string; senderName: string; text: string }) => {
   try {
-    // Save incoming message
-    await saveMessage(data.senderId, data.senderName, 'incoming', data.text, false);
+    const { senderId, senderName, text } = data;
 
-    const lower = data.text.toLowerCase();
-
-    // Check if this looks like an important conversation
-    const isImportant = importantConversationTriggers.some((phrase) => lower.includes(phrase));
-
-    if (isImportant) {
-      console.log(`🔔 Important conversation from ${data.senderName} (${data.senderId})`);
-
-      const history = await getConversationHistory(data.senderId, 5);
-      const context = history.map((h: any) => `${h.role === 'user' ? '👤' : '🤖'} ${h.content}`).join('\n');
-
-      await sendImportantConversationAlert(data.senderName, data.senderId, context || 'No recent history');
-
-      // Show typing then reply
-      await showTyping(data.senderId, 2000);
-      const reply = "acha bolbo, me sun raha hu 🤲";
-      await sendWhatsAppMessage(data.senderId, reply);
-      await saveMessage(data.senderId, undefined, 'outgoing', reply, true);
-      return;
+    // Initialize buffer for this sender
+    if (!messageBuffers[senderId]) {
+      messageBuffers[senderId] = { messages: [], timer: undefined as any };
     }
 
-    // Telegram instant alert for urgent keywords
-    if (urgentKeywords.some((kw) => lower.includes(kw))) {
-      console.log('🚨 URGENT message detected — sending Telegram alert');
-      await sendInstantAlert(data.senderName, data.text, 'Urgent keywords detected');
-    }
+    const buffer = messageBuffers[senderId];
+    buffer.messages.push({ text, timestamp: Date.now() });
 
-    // Check busy mode
-    if (!config.busyMode) {
-      console.log('⏸️ Busy mode OFF — not auto-replying');
-      return;
-    }
+    // Clear existing timer
+    clearTimeout(buffer.timer);
 
-    // Get conversation history
-    const history = await getConversationHistory(data.senderId, 10);
-
-    // Generate AI reply with metadata
-    const result = await generateReply(data.text, history, data.senderName, data.senderId);
-
-    // Skip if no reply (already sent exhausted message)
-    if (!result.text) {
-      console.log(`⏭️ Skipping reply to ${data.senderName} — already sent exhausted message`);
-      return;
-    }
-
-    console.log(`💬 AI Reply to ${data.senderName} (${result.metadata.typingDelay}ms delay): ${result.text}`);
-
-    // Show typing indicator for realistic delay
-    await showTyping(data.senderId, result.metadata.typingDelay);
-
-    // Wait for typing to finish before sending
-    await new Promise((resolve) => setTimeout(resolve, result.metadata.typingDelay));
-
-    // Send reply
-    await sendWhatsAppMessage(data.senderId, result.text);
-    await saveMessage(data.senderId, undefined, 'outgoing', result.text, true);
+    // Set timer to process batch after window
+    buffer.timer = setTimeout(() => {
+      const combined = buffer.messages.map(m => m.text).join('\n');
+      delete messageBuffers[senderId];
+      processBatchedMessage(senderId, senderName, combined);
+    }, BATCH_WINDOW_MS);
   } catch (error) {
-    console.error('Error processing message:', error);
+    console.error('Error batching message:', error);
   }
 });
 

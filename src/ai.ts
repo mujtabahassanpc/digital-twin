@@ -189,14 +189,16 @@ async function callGemini(systemPrompt: string, userMessage: string): Promise<st
   for (const key of keys) {
     try {
       const ai = new GoogleGenAI({ apiKey: key });
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: `${systemPrompt}\n\nUser's latest message: "${userMessage}"\n\nYour reply (remember the rules above):`,
-        config: { temperature: 0.8, topP: 0.9, maxOutputTokens: 300 },
+      const response = await retryWithBackoff(async () => {
+        return await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: `${systemPrompt}\n\nUser's latest message: "${userMessage}"\n\nYour reply (remember the rules above):`,
+          config: { temperature: 0.8, topP: 0.9, maxOutputTokens: 300 },
+        });
       });
       return response.text?.trim() || '';
     } catch (err: any) {
-      if (is429Error(err)) continue; // Try next key
+      if (is429Error(err)) continue;
       throw err;
     }
   }
@@ -206,28 +208,30 @@ async function callGemini(systemPrompt: string, userMessage: string): Promise<st
 async function callOpenAICompatible(baseURL: string, model: string, keys: string[], extraHeaders: Record<string, string>, systemPrompt: string, userMessage: string): Promise<string> {
   for (const key of keys) {
     try {
-      const res = await fetch(`${baseURL}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${key}`,
-          ...extraHeaders,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userMessage },
-          ],
-          temperature: 0.8,
-          max_tokens: 300,
-        }),
+      const res = await retryWithBackoff(async () => {
+        const response = await fetch(`${baseURL}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${key}`,
+            ...extraHeaders,
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userMessage },
+            ],
+            temperature: 0.8,
+            max_tokens: 300,
+          }),
+        });
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(`${baseURL} ${response.status}: ${body}`);
+        }
+        return response;
       });
-
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`${baseURL} ${res.status}: ${body}`);
-      }
 
       const data = await res.json();
       if (!data.choices || data.choices.length === 0 || !data.choices[0].message || !data.choices[0].message.content) {
@@ -235,7 +239,7 @@ async function callOpenAICompatible(baseURL: string, model: string, keys: string
       }
       return data.choices[0].message.content;
     } catch (err: any) {
-      if (is429Error(err) && keys.length > 1) continue; // Try next key
+      if (is429Error(err) && keys.length > 1) continue;
       throw err;
     }
   }
@@ -267,22 +271,24 @@ async function callCohere(systemPrompt: string, userMessage: string): Promise<st
 
   for (const key of keys) {
     try {
-      const res = await fetch('https://api.cohere.ai/v1/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-        body: JSON.stringify({
-          model: 'command-r',
-          message: userMessage,
-          preamble: systemPrompt,
-          temperature: 0.8,
-          max_tokens: 300,
-        }),
+      const res = await retryWithBackoff(async () => {
+        const response = await fetch('https://api.cohere.ai/v1/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+          body: JSON.stringify({
+            model: 'command-r',
+            message: userMessage,
+            preamble: systemPrompt,
+            temperature: 0.8,
+            max_tokens: 300,
+          }),
+        });
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(`Cohere ${response.status}: ${body}`);
+        }
+        return response;
       });
-
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Cohere ${res.status}: ${body}`);
-      }
 
       const data = await res.json();
       if (!data.text) throw new Error('Empty response from Cohere');
@@ -337,6 +343,29 @@ function is429Error(err: any): boolean {
   return msg.includes('429') || msg.includes('quota') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('rate_limit') || msg.includes('too_many');
 }
 
+function isRetryableError(err: any): boolean {
+  const msg = err?.message || '';
+  return msg.includes('503') || msg.includes('500') || msg.includes('UNAVAILABLE') || msg.includes('network') || msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT');
+}
+
+async function retryWithBackoff<T>(fn: () => Promise<T>, maxRetries: number = 2): Promise<T> {
+  let lastErr: any;
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      if (!isRetryableError(err)) throw err;
+      if (i < maxRetries) {
+        const delay = 1000 * Math.pow(2, i);
+        console.log(`🔄 Retryable error (${err.message}), retrying in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 // ============================================================
 // CLEAN UP AI RESPONSE
 // ============================================================
@@ -369,12 +398,31 @@ export interface ReplyMetadata {
   isImportant: boolean;
 }
 
+export interface GenerateReplyResult {
+  text: string;
+  metadata: ReplyMetadata;
+  needsClarification: boolean;
+  clarificationText: string;
+}
+
+function makeResult(text: string, metadata?: Partial<ReplyMetadata>, clarification?: { needsClarification: boolean; text: string }): GenerateReplyResult {
+  return {
+    text,
+    metadata: {
+      typingDelay: metadata?.typingDelay ?? getTypingDelay(text.length),
+      isImportant: metadata?.isImportant ?? isImportantMessage(text),
+    },
+    needsClarification: clarification?.needsClarification ?? false,
+    clarificationText: clarification?.text ?? '',
+  };
+}
+
 export async function generateReply(
   senderMessage: string,
   conversationHistory: ConversationEntry[] = [],
   senderName?: string,
   senderId?: string
-): Promise<{ text: string; metadata: ReplyMetadata }> {
+): Promise<GenerateReplyResult> {
   const id = senderId || 'unknown';
 
   // Prune old entries to prevent memory leaks
@@ -384,19 +432,16 @@ export async function generateReply(
   const availableProviders = providers.filter(p => isProviderAvailable(p.name) && !isProviderOnCooldown(p.name));
 
   if (availableProviders.length === 0) {
-    // Already sent exhausted message — skip
+    // Already sent exhausted message — try clarification instead of repeating
     if (exhaustedSent[id]) {
-      console.log(`⏭️ Skipping reply to ${id} — already sent exhausted message`);
-      return { text: '', metadata: { typingDelay: 0, isImportant: false } };
+      console.log(`⏭️ Skipping reply to ${id} — already sent exhausted message, trying clarification`);
+      return makeResult('', {}, { needsClarification: true, text: 'bhai abhi sab AI busy hai, thoda wait karo ya phir se bolo' });
     }
 
-    // First time exhausted — send once
-    console.log(`⚠️ ALL providers exhausted — sending const message to ${id}`);
+    // First time all providers down — don't send const busy msg, ask for clarification
+    console.log(`⚠️ ALL providers down — asking ${id} to rephrase`);
     exhaustedSent[id] = true;
-    return {
-      text: EXHAUSTED_MESSAGE,
-      metadata: { typingDelay: 2000, isImportant: false },
-    };
+    return makeResult('', {}, { needsClarification: true, text: 'Ami akhon ektu busy achi, ektu pore kotha bolte paren. 🥲' });
   }
 
   // Reset exhausted flag when providers available
@@ -412,6 +457,12 @@ export async function generateReply(
   // Analyze conversation context naturally (no hardcoded phrases)
   const conversationContext = getConversationContext(senderMessage, conversationHistory);
 
+  // Check if this is an unknown sender — add name-asking instruction
+  const isNewSender = !contactInfo || contactInfo.length < 20;
+  const nameAskInstruction = isNewSender && conversationHistory.length <= 2
+    ? '\n\n⚠️ NAME DETECTION: This person seems new (you have no saved info about them). If the conversation feels natural and you haven\'t asked yet, casually ask their name sometime soon. Don\'t be robotic — weave it into the conversation naturally. Like "acha btw tumhara naam kya hai?" or at the end of a friendly exchange.'
+    : '';
+
   // Build system prompt
   const timeContext = getTimeContext();
   const systemPrompt = buildSystemPrompt(
@@ -420,7 +471,7 @@ export async function generateReply(
     contactInfo,
     languageExamples,
     timeContext,
-    conversationContext,
+    conversationContext + nameAskInstruction,
     conversationHistory,
     senderName
   );
@@ -440,35 +491,25 @@ export async function generateReply(
         learnFromConversation(id, senderName, senderMessage, cleaned, conversationHistory);
 
         console.log(`✅ ${provider.name}: ${cleaned.slice(0, 60)}...`);
-        return {
-          text: cleaned,
-          metadata: {
-            typingDelay: getTypingDelay(cleaned.length),
-            isImportant: isImportantMessage(senderMessage),
-          },
-        };
+        return makeResult(cleaned);
       }
     } catch (err: any) {
       if (is429Error(err)) {
         console.log(`🔑 ${provider.name} 429 — next provider`);
         setProviderCooldown(provider.name);
+      } else if (isRetryableError(err)) {
+        // Retryable errors (503, 500) are already retried inside the provider functions
+        // If we get here, retries also failed — move to next provider
+        console.log(`❌ ${provider.name} retryable error after retries: ${err.message}`);
       } else {
-        // Non-429 errors (bad key, network, etc.) — don't set cooldown,
-        // the provider can be retried immediately since it may be a different key issue
         console.log(`❌ ${provider.name} error: ${err.message}`);
       }
     }
   }
 
-  // All providers failed in this round
-  if (exhaustedSent[id]) {
-    return { text: '', metadata: { typingDelay: 0, isImportant: false } };
-  }
-  exhaustedSent[id] = true;
-  return {
-    text: EXHAUSTED_MESSAGE,
-    metadata: { typingDelay: 2000, isImportant: false },
-  };
+  // All providers failed in this round — use clarification mode instead of const message
+  console.log(`🤔 All providers failed for ${id} — using clarification mode`);
+  return makeResult('', {}, { needsClarification: true, text: 'bhai me samja nhi, ek baar phir se bolna?' });
 }
 
 // ============================================================
