@@ -140,9 +140,37 @@ export async function showTyping(to: string, durationMs: number): Promise<void> 
   }
 }
 
+export function toJid(phoneNumber: string): string {
+  // Already a valid JID
+  if (phoneNumber.includes('@')) return phoneNumber;
+
+  // Remove all non-digit characters
+  let num = phoneNumber.replace(/[^0-9]/g, '');
+
+  // Must be at least 10 digits for a phone number
+  if (num.length < 10) {
+    console.warn(`⚠️ Invalid phone number: "${phoneNumber}" (stripped to "${num}")`);
+  }
+
+  return `${num}@s.whatsapp.net`;
+}
+
 export async function sendWhatsAppMessage(to: string, text: string) {
   if (!sock) throw new Error('WhatsApp not started');
-  await sock!.sendMessage(to, { text });
+
+  try {
+    const jid = to.includes('@') ? to : toJid(to);
+    const result = await sock!.sendMessage(jid, { text });
+    return result;
+  } catch (err: any) {
+    // If it's a JID decode error, try with @lid suffix
+    if (err?.message?.includes('jidDecode') || err?.message?.includes('invalid jid')) {
+      const lidJid = to.includes('@') ? to : `${to.replace(/[^0-9]/g, '')}@lid`;
+      console.log(`🔄 Retrying with LID JID: ${lidJid}`);
+      return sock!.sendMessage(lidJid, { text });
+    }
+    throw err;
+  }
 }
 
 export function getQRCode() {

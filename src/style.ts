@@ -128,8 +128,9 @@ function analyzeStyle(messages: ChatMessage[], userName: string = 'Mujtaba') {
   console.log(`Profile saved to: ${styleProfilePath}`);
 }
 
-// Run if called directly
-if (process.argv[2]) {
+// Run if called directly (not when imported)
+const isMainModule = import.meta.url === `file://${process.argv[1]}`.replace(/\\/g, '/');
+if (isMainModule && process.argv[2]) {
   const filePath = process.argv[2];
   const userName = process.argv[3] || 'Mujtaba';
 

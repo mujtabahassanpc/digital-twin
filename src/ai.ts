@@ -11,11 +11,21 @@ const contextPath = path.join(dataDir, 'context.md');
 const contactsPath = path.join(dataDir, 'contacts.json');
 const languageExamplesPath = path.join(dataDir, 'language_examples.json');
 
-// Per-sender reply tracking
+// Per-sender reply tracking (bounded to prevent memory leaks)
 const recentReplies: Record<string, string[]> = {};
+const MAX_TRACKED_SENDERS = 100;
 
-// Track which senders received the exhausted message
+// Track which senders received the exhausted message (bounded)
 const exhaustedSent: Record<string, boolean> = {};
+
+function pruneExhaustedSent() {
+  const keys = Object.keys(exhaustedSent);
+  if (keys.length > MAX_TRACKED_SENDERS) {
+    // Remove oldest entries
+    const toRemove = keys.slice(0, keys.length - MAX_TRACKED_SENDERS);
+    for (const k of toRemove) delete exhaustedSent[k];
+  }
+}
 
 // Provider cooldowns (5 min after 429)
 const providerCooldowns: Record<string, number> = {
@@ -175,116 +185,114 @@ function buildSystemPrompt(
 async function callGemini(systemPrompt: string, userMessage: string): Promise<string> {
   const keys = config.getGeminiKeys();
   if (keys.length === 0) throw new Error('No Gemini keys');
-  const ai = new GoogleGenAI({ apiKey: keys[0] });
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: `${systemPrompt}\n\nUser's latest message: "${userMessage}"\n\nYour reply (remember the rules above):`,
-    config: { temperature: 0.8, topP: 0.9, maxOutputTokens: 300 },
-  });
-  return response.text?.trim() || '';
+
+  for (const key of keys) {
+    try {
+      const ai = new GoogleGenAI({ apiKey: key });
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: `${systemPrompt}\n\nUser's latest message: "${userMessage}"\n\nYour reply (remember the rules above):`,
+        config: { temperature: 0.8, topP: 0.9, maxOutputTokens: 300 },
+      });
+      return response.text?.trim() || '';
+    } catch (err: any) {
+      if (is429Error(err)) continue; // Try next key
+      throw err;
+    }
+  }
+  throw new Error('All Gemini keys exhausted');
+}
+
+async function callOpenAICompatible(baseURL: string, model: string, keys: string[], extraHeaders: Record<string, string>, systemPrompt: string, userMessage: string): Promise<string> {
+  for (const key of keys) {
+    try {
+      const res = await fetch(`${baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${key}`,
+          ...extraHeaders,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMessage },
+          ],
+          temperature: 0.8,
+          max_tokens: 300,
+        }),
+      });
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`${baseURL} ${res.status}: ${body}`);
+      }
+
+      const data = await res.json();
+      if (!data.choices || data.choices.length === 0 || !data.choices[0].message || !data.choices[0].message.content) {
+        throw new Error('Empty or invalid response from API');
+      }
+      return data.choices[0].message.content;
+    } catch (err: any) {
+      if (is429Error(err) && keys.length > 1) continue; // Try next key
+      throw err;
+    }
+  }
+  throw new Error('All keys exhausted');
 }
 
 async function callMistral(systemPrompt: string, userMessage: string): Promise<string> {
-  const keys = config.getMistralKeys();
-  if (keys.length === 0) throw new Error('No Mistral keys');
-  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${keys[0]}` },
-    body: JSON.stringify({
-      model: 'mistral-small-latest',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
-      temperature: 0.8,
-      top_p: 0.9,
-      max_tokens: 300,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Mistral ${res.status}: ${body}`);
-  }
-  const data = await res.json();
-  return data.choices[0].message.content;
+  return callOpenAICompatible('https://api.mistral.ai/v1', 'mistral-small-latest', config.getMistralKeys(), {}, systemPrompt, userMessage);
 }
 
 async function callGroq(systemPrompt: string, userMessage: string): Promise<string> {
-  const keys = config.getGroqKeys();
-  if (keys.length === 0) throw new Error('No Groq keys');
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${keys[0]}` },
-    body: JSON.stringify({
-      model: 'llama-3.1-8b-instant',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
-      temperature: 0.8,
-      max_tokens: 300,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Groq ${res.status}: ${body}`);
-  }
-  const data = await res.json();
-  return data.choices[0].message.content;
+  return callOpenAICompatible('https://api.groq.com/openai/v1', 'llama-3.1-8b-instant', config.getGroqKeys(), {}, systemPrompt, userMessage);
 }
 
 async function callOpenRouter(systemPrompt: string, userMessage: string): Promise<string> {
-  const keys = config.getOpenRouterKeys();
-  if (keys.length === 0) throw new Error('No OpenRouter keys');
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${keys[0]}`,
-      'HTTP-Referer': 'https://digital-twin.onrender.com',
-      'X-Title': 'Mahir Digital Twin',
-    },
-    body: JSON.stringify({
-      model: 'meta-llama/llama-3.1-8b-instruct:free',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
-      temperature: 0.8,
-      max_tokens: 300,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`OpenRouter ${res.status}: ${body}`);
-  }
-  const data = await res.json();
-  return data.choices[0].message.content;
+  return callOpenAICompatible(
+    'https://openrouter.ai/api/v1',
+    'meta-llama/llama-3.1-8b-instruct:free',
+    config.getOpenRouterKeys(),
+    { 'HTTP-Referer': 'https://digital-twin.onrender.com', 'X-Title': 'Mahir Digital Twin' },
+    systemPrompt,
+    userMessage
+  );
 }
 
 async function callCohere(systemPrompt: string, userMessage: string): Promise<string> {
   const keys = config.getCohereKeys();
   if (keys.length === 0) throw new Error('No Cohere keys');
-  const res = await fetch('https://api.cohere.ai/v1/chat', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${keys[0]}`,
-    },
-    body: JSON.stringify({
-      model: 'command-r',
-      message: userMessage,
-      preamble: systemPrompt,
-      temperature: 0.8,
-      max_tokens: 300,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Cohere ${res.status}: ${body}`);
+
+  for (const key of keys) {
+    try {
+      const res = await fetch('https://api.cohere.ai/v1/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+        body: JSON.stringify({
+          model: 'command-r',
+          message: userMessage,
+          preamble: systemPrompt,
+          temperature: 0.8,
+          max_tokens: 300,
+        }),
+      });
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Cohere ${res.status}: ${body}`);
+      }
+
+      const data = await res.json();
+      if (!data.text) throw new Error('Empty response from Cohere');
+      return data.text;
+    } catch (err: any) {
+      if (is429Error(err) && keys.length > 1) continue;
+      throw err;
+    }
   }
-  const data = await res.json();
-  return data.text;
+  throw new Error('All Cohere keys exhausted');
 }
 
 // ============================================================
@@ -333,11 +341,10 @@ function is429Error(err: any): boolean {
 // CLEAN UP AI RESPONSE
 // ============================================================
 
-function cleanReply(text: string): string {
+function cleanReply(text: string | undefined | null): string {
+  if (!text) return '';
   let reply = text.trim();
-  // Remove prefixes
   reply = reply.replace(/^(Mahir:|Abher:|Reply:|AI:|Assistant:|Mahir Abher:)/gi, '').trim();
-  // Remove quotes
   reply = reply.replace(/^["'`]|["'`]$/g, '').trim();
   return reply;
 }
@@ -369,6 +376,9 @@ export async function generateReply(
   senderId?: string
 ): Promise<{ text: string; metadata: ReplyMetadata }> {
   const id = senderId || 'unknown';
+
+  // Prune old entries to prevent memory leaks
+  pruneExhaustedSent();
 
   // Check if ALL providers are on cooldown
   const availableProviders = providers.filter(p => isProviderAvailable(p.name) && !isProviderOnCooldown(p.name));
@@ -443,8 +453,9 @@ export async function generateReply(
         console.log(`🔑 ${provider.name} 429 — next provider`);
         setProviderCooldown(provider.name);
       } else {
+        // Non-429 errors (bad key, network, etc.) — don't set cooldown,
+        // the provider can be retried immediately since it may be a different key issue
         console.log(`❌ ${provider.name} error: ${err.message}`);
-        setProviderCooldown(provider.name);
       }
     }
   }
@@ -524,6 +535,13 @@ function isImportantMessage(text: string): boolean {
 }
 
 function trackReply(senderId: string, reply: string) {
+  // Cap tracked senders to prevent memory leaks
+  const keys = Object.keys(recentReplies);
+  if (keys.length >= MAX_TRACKED_SENDERS && !recentReplies[senderId]) {
+    // Remove oldest entry (first key)
+    delete recentReplies[keys[0]];
+  }
+
   if (!recentReplies[senderId]) recentReplies[senderId] = [];
   recentReplies[senderId].push(reply);
   if (recentReplies[senderId].length > 15) recentReplies[senderId] = recentReplies[senderId].slice(-15);
