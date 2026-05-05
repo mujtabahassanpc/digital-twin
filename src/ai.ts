@@ -5,44 +5,170 @@ import { fileURLToPath } from 'url';
 import { config } from './config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const guidePath = path.join(__dirname, '..', 'data', 'ai_guide.md');
+const dataDir = path.join(__dirname, '..', 'data');
+const personalityPath = path.join(dataDir, 'personality.md');
+const contextPath = path.join(dataDir, 'context.md');
+const contactsPath = path.join(dataDir, 'contacts.json');
 
 // Per-sender reply tracking
 const recentReplies: Record<string, string[]> = {};
 
-// Provider cooldown timers
+// Track which senders received the exhausted message
+const exhaustedSent: Record<string, boolean> = {};
+
+// Provider cooldowns (5 min after 429)
 const providerCooldowns: Record<string, number> = {
   gemini: 0,
   mistral: 0,
   groq: 0,
   openrouter: 0,
-  deepseek: 0,
+  cohere: 0,
 };
 
-// Whether we've sent the exhausted message to each sender
-const exhaustedMessagesSent: Record<string, boolean> = {};
+// ============================================================
+// FILE LOADERS
+// ============================================================
 
-function loadGuide(): string {
+function loadFile(filePath: string): string {
   try {
-    return fs.readFileSync(guidePath, 'utf-8');
+    return fs.readFileSync(filePath, 'utf-8');
   } catch {
     return '';
   }
 }
 
+function loadPersonality(): string {
+  return loadFile(personalityPath);
+}
+
+function loadContext(): string {
+  return loadFile(contextPath);
+}
+
+function loadContacts(): Record<string, any> {
+  try {
+    const raw = fs.readFileSync(contactsPath, 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return { contacts: {}, last_updated: new Date().toISOString() };
+  }
+}
+
+function saveContact(senderId: string, info: any) {
+  const data = loadContacts();
+  data.contacts[senderId] = {
+    ...data.contacts[senderId],
+    ...info,
+    last_seen: new Date().toISOString(),
+  };
+  data.last_updated = new Date().toISOString();
+  try {
+    fs.writeFileSync(contactsPath, JSON.stringify(data, null, 2));
+  } catch {
+    // silent
+  }
+}
+
 // ============================================================
-// API PROVIDERS — each returns text or throws
+// CONVERSATION ENDING DETECTION
+// ============================================================
+
+function isConversationEnding(userMessage: string, history: any[]): boolean {
+  const lower = userMessage.toLowerCase().trim();
+
+  // Explicit ending phrases
+  const endingPhrases = [
+    'na kichu na', 'kuch nahi', 'nothing', 'bas itna hi', 'bas',
+    'bye', 'jaata hu', 'chal', 'tata', 'goodbye', 'byee',
+    'thik hai', 'theek hai', 'ok', 'okay', 'achha', 'acha',
+    'hmm', 'mm', 'haan',
+  ];
+
+  // If user says any ending phrase
+  if (endingPhrases.some(p => lower.includes(p))) {
+    return true;
+  }
+
+  // If user gives very short response (< 4 chars) AND conversation has been going on
+  if (userMessage.trim().length < 4 && history.length > 4) {
+    return true;
+  }
+
+  // If last 2 user messages were both short/ending
+  const lastTwoUser = history.filter((e: any) => e.role === 'user').slice(-2);
+  if (lastTwoUser.length === 2 && lastTwoUser.every((e: any) => e.content.trim().length < 8)) {
+    return true;
+  }
+
+  return false;
+}
+
+// ============================================================
+// SYSTEM PROMPT BUILDER
+// ============================================================
+
+function buildSystemPrompt(
+  personality: string,
+  context: string,
+  contactInfo: string,
+  timeContext: string,
+  isEnding: boolean,
+  history: any[],
+  senderName?: string
+): string {
+  let prompt = `${personality}\n\n`;
+
+  // Current context (dynamic)
+  if (context) {
+    prompt += `CURRENT SITUATION:\n${context}\n\n`;
+  }
+
+  // Contact memory
+  if (contactInfo) {
+    prompt += `WHAT YOU KNOW ABOUT THIS PERSON:\n${contactInfo}\n\n`;
+  }
+
+  // Time context
+  prompt += `Current time: ${timeContext}.\n\n`;
+
+  // CRITICAL: Ending mode instructions
+  if (isEnding) {
+    prompt += `⚠️ CONVERSATION IS ENDING. The user has indicated they have nothing more to say.
+RULES FOR ENDING:
+1. Acknowledge their last message naturally
+2. DO NOT ask any new questions
+3. DO NOT say "kita kbr" or "kamon asos" or "how are you"
+4. Keep it to 1 sentence max
+5. Natural closing like "acha thik hai, Mujtaba ko bol dunga 👍" or "ok, take care"`;
+  } else {
+    prompt += `Conversation is ONGOING. Respond naturally. If user asks a question, answer it. If they share news, react to it.`;
+  }
+
+  // Conversation history
+  if (history.length > 0) {
+    const recent = history.slice(-8);
+    prompt += `\n\nRECENT CONVERSATION (read carefully to understand context):\n`;
+    for (const entry of recent) {
+      const speaker = entry.role === 'user' ? (senderName || 'Friend') : 'Mahir';
+      prompt += `${speaker}: ${entry.content}\n`;
+    }
+  }
+
+  return prompt;
+}
+
+// ============================================================
+// API PROVIDERS
 // ============================================================
 
 async function callGemini(systemPrompt: string, userMessage: string): Promise<string> {
   const keys = config.getGeminiKeys();
   if (keys.length === 0) throw new Error('No Gemini keys');
-
   const ai = new GoogleGenAI({ apiKey: keys[0] });
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash',
-    contents: `${systemPrompt}\n\nUser: ${userMessage}\n\nReply:`,
-    config: { temperature: 0.85, topP: 0.9, maxOutputTokens: 500 },
+    contents: `${systemPrompt}\n\nUser's latest message: "${userMessage}"\n\nYour reply (remember the rules above):`,
+    config: { temperature: 0.8, topP: 0.9, maxOutputTokens: 300 },
   });
   return response.text?.trim() || '';
 }
@@ -50,7 +176,6 @@ async function callGemini(systemPrompt: string, userMessage: string): Promise<st
 async function callMistral(systemPrompt: string, userMessage: string): Promise<string> {
   const keys = config.getMistralKeys();
   if (keys.length === 0) throw new Error('No Mistral keys');
-
   const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${keys[0]}` },
@@ -60,17 +185,15 @@ async function callMistral(systemPrompt: string, userMessage: string): Promise<s
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMessage },
       ],
-      temperature: 0.85,
+      temperature: 0.8,
       top_p: 0.9,
-      max_tokens: 500,
+      max_tokens: 300,
     }),
   });
-
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Mistral ${res.status}: ${body}`);
   }
-
   const data = await res.json();
   return data.choices[0].message.content;
 }
@@ -78,7 +201,6 @@ async function callMistral(systemPrompt: string, userMessage: string): Promise<s
 async function callGroq(systemPrompt: string, userMessage: string): Promise<string> {
   const keys = config.getGroqKeys();
   if (keys.length === 0) throw new Error('No Groq keys');
-
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${keys[0]}` },
@@ -88,16 +210,14 @@ async function callGroq(systemPrompt: string, userMessage: string): Promise<stri
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMessage },
       ],
-      temperature: 0.85,
-      max_tokens: 500,
+      temperature: 0.8,
+      max_tokens: 300,
     }),
   });
-
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Groq ${res.status}: ${body}`);
   }
-
   const data = await res.json();
   return data.choices[0].message.content;
 }
@@ -105,7 +225,6 @@ async function callGroq(systemPrompt: string, userMessage: string): Promise<stri
 async function callOpenRouter(systemPrompt: string, userMessage: string): Promise<string> {
   const keys = config.getOpenRouterKeys();
   if (keys.length === 0) throw new Error('No OpenRouter keys');
-
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -120,49 +239,45 @@ async function callOpenRouter(systemPrompt: string, userMessage: string): Promis
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMessage },
       ],
-      temperature: 0.85,
-      max_tokens: 500,
+      temperature: 0.8,
+      max_tokens: 300,
     }),
   });
-
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`OpenRouter ${res.status}: ${body}`);
   }
-
   const data = await res.json();
   return data.choices[0].message.content;
 }
 
-async function callDeepSeek(systemPrompt: string, userMessage: string): Promise<string> {
-  const keys = config.getDeepSeekKeys();
-  if (keys.length === 0) throw new Error('No DeepSeek keys');
-
-  const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
+async function callCohere(systemPrompt: string, userMessage: string): Promise<string> {
+  const keys = config.getCohereKeys();
+  if (keys.length === 0) throw new Error('No Cohere keys');
+  const res = await fetch('https://api.cohere.ai/v1/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${keys[0]}` },
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${keys[0]}`,
+    },
     body: JSON.stringify({
-      model: 'deepseek-chat',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
-      temperature: 0.85,
-      max_tokens: 500,
+      model: 'command-r',
+      message: userMessage,
+      preamble: systemPrompt,
+      temperature: 0.8,
+      max_tokens: 300,
     }),
   });
-
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`DeepSeek ${res.status}: ${body}`);
+    throw new Error(`Cohere ${res.status}: ${body}`);
   }
-
   const data = await res.json();
-  return data.choices[0].message.content;
+  return data.text;
 }
 
 // ============================================================
-// PROVIDER REGISTRY — tries each in order, skips cooldowned
+// PROVIDER REGISTRY
 // ============================================================
 
 interface Provider {
@@ -175,7 +290,7 @@ const providers: Provider[] = [
   { name: 'mistral', call: callMistral },
   { name: 'groq', call: callGroq },
   { name: 'openrouter', call: callOpenRouter },
-  { name: 'deepseek', call: callDeepSeek },
+  { name: 'cohere', call: callCohere },
 ];
 
 function isProviderAvailable(name: string): boolean {
@@ -184,7 +299,7 @@ function isProviderAvailable(name: string): boolean {
     case 'mistral': return config.getMistralKeys().length > 0;
     case 'groq': return config.getGroqKeys().length > 0;
     case 'openrouter': return config.getOpenRouterKeys().length > 0;
-    case 'deepseek': return config.getDeepSeekKeys().length > 0;
+    case 'cohere': return config.getCohereKeys().length > 0;
     default: return false;
   }
 }
@@ -200,7 +315,7 @@ function setProviderCooldown(name: string) {
 
 function is429Error(err: any): boolean {
   const msg = err?.message || '';
-  return msg.includes('429') || msg.includes('quota') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('rate_limit');
+  return msg.includes('429') || msg.includes('quota') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('rate_limit') || msg.includes('too_many');
 }
 
 // ============================================================
@@ -209,108 +324,18 @@ function is429Error(err: any): boolean {
 
 function cleanReply(text: string): string {
   let reply = text.trim();
-  reply = reply.replace(/^(Mahir:|Abher:|Reply:|AI:|Assistant:)/gi, '').trim();
-  reply = reply.replace(/^["']|["']$/g, '').trim();
+  // Remove prefixes
+  reply = reply.replace(/^(Mahir:|Abher:|Reply:|AI:|Assistant:|Mahir Abher:)/gi, '').trim();
+  // Remove quotes
+  reply = reply.replace(/^["'`]|["'`]$/g, '').trim();
   return reply;
 }
 
 // ============================================================
-// CONTEXTUAL FALLBACK — when ALL providers exhausted
-// This is the ONE const message DeepSeek suggested
+// EXHAUSTED MESSAGE (const — only sent ONCE per sender)
 // ============================================================
 
 const EXHAUSTED_MESSAGE = 'Ami akhon ektu busy achi, ektu pore kotha bolte paren. 🥲';
-
-// For emoji-only or very short user messages when exhausted
-const EXHAUSTED_SHORT = '🥲'
-
-function getExhaustedReply(userMessage: string): { text: string; metadata: ReplyMetadata } {
-  // If user sent only emoji or very short, reply with just emoji
-  const trimmed = userMessage.trim();
-  if (trimmed.length <= 2 || /^[\p{Emoji}\s]+$/u.test(trimmed)) {
-    return {
-      text: EXHAUSTED_SHORT,
-      metadata: { typingDelay: 1000, isImportant: false },
-    };
-  }
-
-  return {
-    text: EXHAUSTED_MESSAGE,
-    metadata: { typingDelay: 2000, isImportant: false },
-  };
-}
-
-// ============================================================
-// CONTEXT-AWARE SMART REPLIES (when API is down)
-// These are NOT random — they respond to what the user said
-// ============================================================
-
-function getSmartFallback(userMessage: string, senderId: string): { text: string; metadata: ReplyMetadata } | null {
-  const lower = userMessage.toLowerCase().trim();
-
-  // Only use smart fallbacks if user asked a direct question or made a statement
-  // NOT for greetings or general chat
-
-  // If user asks "who are you?" or "k tumi?"
-  if (/k.*tumi|who.*are|kaun.*ho|kon.*jon|name.*kita/.test(lower)) {
-    return {
-      text: 'ami Mujtaba er bhai, Mahir. Oo busy hai isliye ami reply disi.',
-      metadata: { typingDelay: 2500, isImportant: false },
-    };
-  }
-
-  // If user asks to call
-  if (/call.*utao|call.*koro|pick.*call|phone.*koro/.test(lower)) {
-    return {
-      text: 'call pari na akhon, text e bolba. Mujtaba ke bolbo call korte. 🥲',
-      metadata: { typingDelay: 2500, isImportant: true },
-    };
-  }
-
-  // If user is angry or frustrated
-  if (/😡|🖕|durr|pagol|stupid|idiot|bakas|faltu/.test(lower)) {
-    return {
-      text: 'sorry bhai, ekta message ao na, ami Mujtaba ke dibo. 🙏',
-      metadata: { typingDelay: 2000, isImportant: true },
-    };
-  }
-
-  // If user says bye or going
-  if (/bye|jaite|jao|goodbye|tata|byee/.test(lower)) {
-    return {
-      text: 'acha ja, pore kotha hobe! Mujtaba ke bolbo. 👋',
-      metadata: { typingDelay: 1500, isImportant: false },
-    };
-  }
-
-  // If user asks about language
-  if (/language|bhasha|kijatir.*language|which.*language/.test(lower)) {
-    return {
-      text: 'Sylheti bhasha re ba, amader local language. 😊',
-      metadata: { typingDelay: 2000, isImportant: false },
-    };
-  }
-
-  // If user asks "kita oise" (what happened)
-  if (/kita.*oise|ki.*hoyeche|what.*happened/.test(lower)) {
-    return {
-      text: 'kuch khaas nahi, Mujtaba busy hai akhon. Pore baat karega. 😊',
-      metadata: { typingDelay: 2000, isImportant: false },
-    };
-  }
-
-  // If user asks for blocking
-  if (/block.*kri|block.*kar/.test(lower)) {
-    return {
-      text: 'block korba na bhai, Mujtaba ke bolbo tumar message. 🥲',
-      metadata: { typingDelay: 2000, isImportant: true },
-    };
-  }
-
-  // Don't return smart fallback for greetings, emojis-only, or general chat
-  // Those will get the exhausted message instead
-  return null;
-}
 
 // ============================================================
 // MAIN REPLY GENERATION
@@ -332,43 +357,52 @@ export async function generateReply(
   senderName?: string,
   senderId?: string
 ): Promise<{ text: string; metadata: ReplyMetadata }> {
-  const guide = loadGuide();
-  const timeContext = getTimeContext();
-
-  // Build system prompt from guide
-  const systemPrompt = buildSystemPrompt(guide, timeContext, conversationHistory, senderName);
+  const id = senderId || 'unknown';
 
   // Check if ALL providers are on cooldown
   const availableProviders = providers.filter(p => isProviderAvailable(p.name) && !isProviderOnCooldown(p.name));
 
   if (availableProviders.length === 0) {
-    // Check if we already sent the exhausted message to this sender
-    const alreadySent = exhaustedMessagesSent[senderId || 'unknown'];
-
-    if (alreadySent) {
-      // Don't spam — just return empty (no reply)
-      console.log('⏳ Already sent exhausted message to this sender — skipping');
+    // Already sent exhausted message — skip
+    if (exhaustedSent[id]) {
+      console.log(`⏭️ Skipping reply to ${id} — already sent exhausted message`);
       return { text: '', metadata: { typingDelay: 0, isImportant: false } };
     }
 
-    // First time exhausted — send const message ONCE
-    console.log('⚠️ ALL providers exhausted — sending const message ONCE');
-    exhaustedMessagesSent[senderId || 'unknown'] = true;
-
-    // Try smart contextual reply first
-    const smartReply = getSmartFallback(senderMessage, senderId || '');
-    if (smartReply) {
-      console.log('🧠 Using smart contextual fallback');
-      return smartReply;
-    }
-
-    return getExhaustedReply(senderMessage);
+    // First time exhausted — send once
+    console.log(`⚠️ ALL providers exhausted — sending const message to ${id}`);
+    exhaustedSent[id] = true;
+    return {
+      text: EXHAUSTED_MESSAGE,
+      metadata: { typingDelay: 2000, isImportant: false },
+    };
   }
 
-  // Reset exhausted flag when providers are available again
-  exhaustedMessagesSent[senderId || 'unknown'] = false;
+  // Reset exhausted flag when providers available
+  exhaustedSent[id] = false;
 
-  // Try each available provider in order
+  // Load personality, context, contacts
+  const personality = loadPersonality();
+  const context = loadContext();
+  const contactsData = loadContacts();
+  const contactInfo = contactsData.contacts[id] ? JSON.stringify(contactsData.contacts[id], null, 2) : '';
+
+  // Detect if conversation is ending
+  const isEnding = isConversationEnding(senderMessage, conversationHistory);
+
+  // Build system prompt
+  const timeContext = getTimeContext();
+  const systemPrompt = buildSystemPrompt(
+    personality,
+    context,
+    contactInfo,
+    timeContext,
+    isEnding,
+    conversationHistory,
+    senderName
+  );
+
+  // Try each available provider
   for (const provider of availableProviders) {
     try {
       console.log(`🚀 Trying ${provider.name}...`);
@@ -376,9 +410,13 @@ export async function generateReply(
       const cleaned = cleanReply(reply);
 
       if (cleaned.length > 0) {
-        trackReply(senderId, cleaned);
-        console.log(`✅ ${provider.name} reply: ${cleaned.slice(0, 50)}...`);
+        // Track reply
+        trackReply(id, cleaned);
 
+        // Save contact info (auto-learn from conversation)
+        learnFromConversation(id, senderName, senderMessage, cleaned, conversationHistory);
+
+        console.log(`✅ ${provider.name}: ${cleaned.slice(0, 60)}...`);
         return {
           text: cleaned,
           metadata: {
@@ -389,7 +427,7 @@ export async function generateReply(
       }
     } catch (err: any) {
       if (is429Error(err)) {
-        console.log(`🔑 ${provider.name} 429 — moving to next provider`);
+        console.log(`🔑 ${provider.name} 429 — next provider`);
         setProviderCooldown(provider.name);
       } else {
         console.log(`❌ ${provider.name} error: ${err.message}`);
@@ -398,86 +436,55 @@ export async function generateReply(
     }
   }
 
-  // All providers failed in this round — try smart fallback or exhausted message
-  const smartReply = getSmartFallback(senderMessage, senderId || '');
-  if (smartReply) return smartReply;
-
-  return getExhaustedReply(senderMessage);
+  // All providers failed in this round
+  if (exhaustedSent[id]) {
+    return { text: '', metadata: { typingDelay: 0, isImportant: false } };
+  }
+  exhaustedSent[id] = true;
+  return {
+    text: EXHAUSTED_MESSAGE,
+    metadata: { typingDelay: 2000, isImportant: false },
+  };
 }
 
 // ============================================================
-// SYSTEM PROMPT BUILDER
+// AUTO-LEARN FROM CONVERSATION
 // ============================================================
 
-function buildSystemPrompt(
-  guide: string,
-  timeContext: string,
-  conversationHistory: ConversationEntry[],
-  senderName?: string
-): string {
-  const basePrompt = `You are Mahir Abher. You are Mujtaba's younger brother handling his WhatsApp messages when he's busy.
+function learnFromConversation(
+  senderId: string,
+  senderName: string | undefined,
+  userMessage: string,
+  aiReply: string,
+  history: any[]
+) {
+  const existing = loadContacts().contacts[senderId] || {};
 
-CORE IDENTITY:
-- You are NOT an AI, NOT a bot, NOT an assistant. You are Mahir, a real Sylheti young man.
-- You speak in Romanized Sylheti (no Bengali script) mixed with some Hindi and English
-- You are warm, casual, friendly, sometimes playful/teasing
-- You reply like a real person texting on WhatsApp — short messages, natural flow
-
-RESPONSE RULES:
-1. Reply ONLY with the message text — no explanations, no quotes, no prefixes
-2. NEVER say you are an AI, bot, or assistant
-3. NEVER use corporate language ("I hope this finds you well", "Certainly", etc.)
-4. ALWAYS respond contextually to what the person actually said
-5. If they ask who you are: "ami Mujtaba er bhai, Mahir. Oo busy hai isliye ami reply disi."
-6. If they ask for Mujtaba to call: "call pari na akhon, text e bolba"
-7. If they seem confused about the language: "Sylheti bhasha re ba, amader local language"
-8. If they seem angry or frustrated: be apologetic, say you'll tell Mujtaba
-9. Match their energy and language style
-10. Keep replies natural — 1-3 short sentences, like real WhatsApp messages
-11. Use emojis sparingly (0-2 per message)
-12. NEVER repeat the same reply you just gave
-
-TIME CONTEXT: It is currently ${timeContext}. Adjust your greeting accordingly.
-${senderName ? `You are talking to: ${senderName}` : ''}
-
-CONVERSATION STYLE EXAMPLES (from real Sylheti WhatsApp chats):
-- "hmm fora ssh ni" (short acknowledgment)
-- "aasi but computer oo🤗" (casual update)
-- "na akn kichchu kaj nai" (simple status)
-- "oo acha😊" (warm acknowledgment)
-- "achi bala ni?" (asking about wellbeing)
-- "oy, kamon asos?" (casual greeting)
-- "amr dimag oo slr na" (expressing frustration)
-- "inshallah" (religious response)
-- "astagfirullah" (surprise/shock)
-- "🤨nani mara gsoin koilay r akn kita koitraay" (playful teasing)
-- "Eh" / "Mm" / "Oo" / "Acha" (very short responses for simple messages)
-
-CRITICAL: Read the user's message carefully and respond to WHAT THEY SAID, not with a generic greeting.
-If they ask a question, answer it. If they share news, react to it. If they're emotional, match their energy.
-If you don't understand something, say "ami bujhi nai, ektu poriskar kore bolba" (I didn't understand, please clarify).
-
-NEVER use these canned/repetitive phrases:
-- "kita kbr?" (unless it's actually a greeting)
-- "kamon asos?" (unless it's actually a greeting)
-- "haan bol, muji shuni ase" (too repetitive)
-- "acha achi kotha bol" (sounds robotic)
-- "sab thik hai?" (don't repeat)
-- "oy, bala ni?" (don't repeat)
-
-${guide ? `BEHAVIORAL GUIDE (follow this):\n${guide}` : ''}`;
-
-  // Add conversation context if available
-  if (conversationHistory.length > 0) {
-    const recent = conversationHistory.slice(-6);
-    let historyText = '\n\nRECENT CONVERSATION:\n';
-    for (const entry of recent) {
-      historyText += `${entry.role === 'user' ? (senderName || 'Friend') : 'Mahir'}: ${entry.content}\n`;
-    }
-    return basePrompt + historyText;
+  // Save sender name if we don't have it
+  if (senderName && !existing.name) {
+    existing.name = senderName;
   }
 
-  return basePrompt;
+  // Track conversation count
+  existing.conversation_count = (existing.conversation_count || 0) + 1;
+
+  // Save last topic (from user message, extract key words)
+  const lower = userMessage.toLowerCase();
+  if (lower.includes('school') || lower.includes('class') || lower.includes('college')) {
+    existing.last_topic = 'education';
+  } else if (lower.includes('work') || lower.includes('job') || lower.includes('kaam')) {
+    existing.last_topic = 'work';
+  } else if (lower.includes('family') || lower.includes('bhai') || lower.includes('maa') || lower.includes('baap')) {
+    existing.last_topic = 'family';
+  } else if (lower.includes('call') || lower.includes('phone')) {
+    existing.last_topic = 'call_request';
+  }
+
+  // Save a summary of last interaction
+  existing.last_message_summary = userMessage.slice(0, 100);
+  existing.last_reply_summary = aiReply.slice(0, 100);
+
+  saveContact(senderId, existing);
 }
 
 // ============================================================
@@ -499,15 +506,14 @@ function getTypingDelay(messageLength: number): number {
 
 function isImportantMessage(text: string): boolean {
   const lower = text.toLowerCase();
-  const importantKeywords = ['urgent', 'emergency', 'help', 'call', 'important', 'personal', 'family', 'medical', 'paisa', 'money', 'acha bolbo', 'block', 'problem'];
-  return importantKeywords.some(kw => lower.includes(kw));
+  const keywords = ['urgent', 'emergency', 'help', 'call me', 'important', 'personal', 'family', 'medical', 'paisa', 'money', 'acha bolbo', 'block'];
+  return keywords.some(kw => lower.includes(kw));
 }
 
-function trackReply(senderId: string | undefined, reply: string) {
-  const key = senderId || 'unknown';
-  if (!recentReplies[key]) recentReplies[key] = [];
-  recentReplies[key].push(reply);
-  if (recentReplies[key].length > 15) recentReplies[key] = recentReplies[key].slice(-15);
+function trackReply(senderId: string, reply: string) {
+  if (!recentReplies[senderId]) recentReplies[senderId] = [];
+  recentReplies[senderId].push(reply);
+  if (recentReplies[senderId].length > 15) recentReplies[senderId] = recentReplies[senderId].slice(-15);
 }
 
-export { loadGuide };
+export { loadPersonality, loadContext, saveContact };

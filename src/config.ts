@@ -24,8 +24,8 @@ export const config = {
   // OpenRouter AI
   openRouterApiKeys: optionalEnv('OPENROUTER_API_KEYS', ''),
 
-  // DeepSeek AI
-  deepSeekApiKeys: optionalEnv('DEEPSEEK_API_KEYS', ''),
+  // Cohere AI
+  cohereApiKeys: optionalEnv('COHERE_API_KEYS', ''),
 
   // Neon Database
   databaseUrl: optionalEnv('DATABASE_URL', ''),
@@ -42,10 +42,10 @@ export const config = {
   isAiReady(): boolean {
     return this.getGeminiKeys().length > 0 || this.getMistralKeys().length > 0 ||
            this.getGroqKeys().length > 0 || this.getOpenRouterKeys().length > 0 ||
-           this.getDeepSeekKeys().length > 0;
+           this.getCohereKeys().length > 0;
   },
 
-  // Get all active Gemini keys (prioritizes pool over single key)
+  // Get all active keys for each provider
   getGeminiKeys(): string[] {
     const pool = parseKeys(this.geminiApiKeys);
     if (pool.length > 0) return pool;
@@ -56,7 +56,7 @@ export const config = {
   getMistralKeys(): string[] { return parseKeys(this.mistralApiKeys); },
   getGroqKeys(): string[] { return parseKeys(this.groqApiKeys); },
   getOpenRouterKeys(): string[] { return parseKeys(this.openRouterApiKeys); },
-  getDeepSeekKeys(): string[] { return parseKeys(this.deepSeekApiKeys); },
+  getCohereKeys(): string[] { return parseKeys(this.cohereApiKeys); },
 
   isDbReady(): boolean { return !!this.databaseUrl; },
   isTelegramReady(): boolean { return !!(this.telegramBotToken && this.telegramChatId); },

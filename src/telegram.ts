@@ -1,5 +1,12 @@
 import { config } from './config.js';
 import { getConversationHistory } from './db.js';
+import fs from 'fs';
+import path, { dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const contextPath = path.join(__dirname, '..', 'data', 'context.md');
+const contactsPath = path.join(__dirname, '..', 'data', 'contacts.json');
 
 const TELEGRAM_API = 'https://api.telegram.org/bot';
 
@@ -203,6 +210,10 @@ export async function handleTelegramCommand(command: string, args: string): Prom
 <b>/busy off</b> — Disable auto-reply
 <b>/reply [number] [msg]</b> — Send manual reply
 <b>/digest</b> — Send today's summary
+<b>/mujtaba [status]</b> — Set Mujtaba's status (busy/available/school/office/sleeping)
+<b>/context [text]</b> — Add custom context instruction
+<b>/contacts</b> — View saved contact memories
+<b>/forget [senderId]</b> — Clear contact memory for a person
 <b>/help</b> — Show this message
 
 — Mahir Abher`);
@@ -258,6 +269,117 @@ export async function handleTelegramCommand(command: string, args: string): Prom
       } catch (error) {
         return sendTelegramMessage('❌ Failed to generate digest');
       }
+
+    case 'mujtaba': {
+      const status = args.toLowerCase().trim();
+      const statusMessages: Record<string, string> = {
+        busy: 'Mujtaba kaam me busy hai. Available nahi hai abhi. Jab free hoga reply karega.',
+        available: 'Mujtaba available hai. Reply kar sakta hai.',
+        school: 'Mujtaba school gaya hai. Wapas aake reply karega.',
+        office: 'Mujtaba office me hai. Kaam khatam hone ke baad reply karega.',
+        sleeping: 'Mujtaba so raha hai. Subah reply karega.',
+        eating: 'Mujtaba khaana kha raha hai. Thodi der me reply karega.',
+        driving: 'Mujtaba drive kar raha hai. Safe pohoch ke reply karega.',
+        meeting: 'Mujtaba meeting me hai. Meeting khatam hone ke baad reply karega.',
+        travelling: 'Mujtaba travel kar raha hai. Pohoch ke reply karega.',
+      };
+
+      let statusText = statusMessages[status];
+      if (!statusText) {
+        statusText = `Mujtaba ${args}. Reply karega jab free hoga.`;
+      }
+
+      const contextContent = `# Mahir — Current Context
+
+## Mujtaba ka Current Status
+- **Status:** ${status}
+- **Details:** ${statusText}
+- **Last updated:** ${new Date().toISOString().split('T')[0]}
+
+## Current Instructions
+- Agar koi Mujtaba se mile toh bolna: "${statusText}"
+- Agar koi urgent hai toh bolna: "Mujtaba ko bol dunga, reply karega jab free hoga"
+- Agar koi general chat kar raha hai toh friendly reply dena
+
+## Special Instructions for Specific Contacts
+(N/A — koi special instruction nahi hai abhi)
+
+## Notes
+- Ye file Mujtaba Telegram se update kar sakta hai
+- Status change karna ho toh /status busy ya /status available use karein
+- Special instruction add karna ho toh /context <instruction> use karein
+`;
+
+      try {
+        fs.writeFileSync(contextPath, contextContent, 'utf-8');
+        return sendTelegramMessage(`✅ Mujtaba's status set to: *${status}*\n\n"${statusText}"\n\nMahir ab ye context use karega.`);
+      } catch (err) {
+        return sendTelegramMessage('❌ Failed to update context file');
+      }
+    }
+
+    case 'context': {
+      if (!args.trim()) {
+        try {
+          const current = fs.readFileSync(contextPath, 'utf-8');
+          return sendTelegramMessage(`📋 *Current Context:*\n\n\`\`\`\n${current.substring(0, 1000)}\n\`\`\``);
+        } catch {
+          return sendTelegramMessage('📋 Context file not found');
+        }
+      }
+
+      try {
+        const current = fs.readFileSync(contextPath, 'utf-8');
+        const updated = current.replace(
+          /(## Special Instructions for Specific Contacts\n).*/,
+          `$1\n- ${args}\n\n_Last updated: ${new Date().toISOString()}_\n`
+        );
+        fs.writeFileSync(contextPath, updated, 'utf-8');
+        return sendTelegramMessage(`✅ Context updated:\n\n"${args}"`);
+      } catch {
+        return sendTelegramMessage('❌ Failed to update context');
+      }
+    }
+
+    case 'contacts': {
+      try {
+        const data = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
+        const contacts = Object.entries(data.contacts || {});
+        if (contacts.length === 0) {
+          return sendTelegramMessage('📋 Koi saved contact nahi hai abhi');
+        }
+
+        const list = contacts.slice(-10).map(([id, info]: [string, any]) => {
+          const name = info.name || 'Unknown';
+          const topic = info.last_topic || 'N/A';
+          const count = info.conversation_count || 0;
+          const last = info.last_message_summary || '';
+          return `• *${name}* (${id})\n  Topic: ${topic} | Chats: ${count}\n  Last: "${last.substring(0, 50)}..."`;
+        }).join('\n\n');
+
+        return sendTelegramMessage(`📋 *Saved Contacts:* (${contacts.length} total)\n\n${list}`);
+      } catch {
+        return sendTelegramMessage('📋 Contacts file not found');
+      }
+    }
+
+    case 'forget': {
+      if (!args.trim()) {
+        return sendTelegramMessage('Usage: /forget <senderId>');
+      }
+      try {
+        const data = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
+        if (data.contacts[args]) {
+          delete data.contacts[args];
+          data.last_updated = new Date().toISOString();
+          fs.writeFileSync(contactsPath, JSON.stringify(data, null, 2));
+          return sendTelegramMessage(`✅ Forgotten contact: ${args}`);
+        }
+        return sendTelegramMessage(`❌ Contact not found: ${args}`);
+      } catch {
+        return sendTelegramMessage('❌ Failed to forget contact');
+      }
+    }
 
     default:
       return sendTelegramMessage(`❓ Unknown command: <code>/${command}</code>\nUse /help for available commands`);
