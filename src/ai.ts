@@ -10,6 +10,8 @@ const personalityPath = path.join(dataDir, 'personality.md');
 const contextPath = path.join(dataDir, 'context.md');
 const contactsPath = path.join(dataDir, 'contacts.json');
 const languageExamplesPath = path.join(dataDir, 'language_examples.json');
+const languageMatcherPath = path.join(dataDir, 'language_matcher.md');
+const conversationRulesPath = path.join(dataDir, 'conversation_rules.md');
 
 // Per-sender reply tracking (bounded to prevent memory leaks)
 const recentReplies: Record<string, string[]> = {};
@@ -85,6 +87,14 @@ function loadLanguageExamples(): string {
   }
 }
 
+function loadLanguageMatcher(): string {
+  return loadFile(languageMatcherPath);
+}
+
+function loadConversationRules(): string {
+  return loadFile(conversationRulesPath);
+}
+
 function saveContact(senderId: string, info: any) {
   const data = loadContacts();
   data.contacts[senderId] = {
@@ -142,6 +152,18 @@ function buildSystemPrompt(
   senderName?: string
 ): string {
   let prompt = `${personality}\n\n`;
+
+  // Language matching rules (NEW)
+  const languageMatcher = loadLanguageMatcher();
+  if (languageMatcher) {
+    prompt += `## LANGUAGE MATCHING (CRITICAL — FOLLOW THESE RULES)\n${languageMatcher}\n\n`;
+  }
+
+  // Conversation rules (NEW)
+  const conversationRules = loadConversationRules();
+  if (conversationRules) {
+    prompt += `## CONVERSATION RULES (CRITICAL — FOLLOW THESE RULES)\n${conversationRules}\n\n`;
+  }
 
   // Current context (dynamic)
   if (context) {
@@ -367,6 +389,84 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, maxRetries: number = 2)
 }
 
 // ============================================================
+// RESPONSE GUARD (inline to avoid circular deps)
+// ============================================================
+
+const recentOutgoing: Record<string, string[]> = {};
+const MAX_OUTGOING_PER_SENDER = 10;
+
+function recordOutgoingInternal(senderId: string, reply: string) {
+  if (!recentOutgoing[senderId]) recentOutgoing[senderId] = [];
+  recentOutgoing[senderId].push(reply);
+  if (recentOutgoing[senderId].length > MAX_OUTGOING_PER_SENDER) {
+    recentOutgoing[senderId] = recentOutgoing[senderId].slice(-MAX_OUTGOING_PER_SENDER);
+  }
+}
+
+function normalizeText(text: string): string {
+  return text.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function wordSetSimilarity(a: string, b: string): number {
+  const wordsA = new Set(a.split(' ').filter((w) => w.length > 2));
+  const wordsB = new Set(b.split(' ').filter((w) => w.length > 2));
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+  let overlap = 0;
+  for (const w of wordsA) {
+    if (wordsB.has(w)) overlap++;
+  }
+  return overlap / Math.max(wordsA.size, wordsB.size);
+}
+
+interface GuardResult {
+  passed: boolean;
+  reason: string;
+  suggestion: string;
+}
+
+function runResponseGuardInternal(reply: string, userMessage: string, senderId: string, history: ConversationEntry[]): GuardResult {
+  // Check 1: Duplicate detection
+  const historyOutgoing = recentOutgoing[senderId] || [];
+  const normalized = normalizeText(reply);
+  for (const prev of historyOutgoing) {
+    if (normalized === normalizeText(prev)) {
+      return { passed: false, reason: 'exact_duplicate', suggestion: 'Reply is identical to a recent message.' };
+    }
+    if (wordSetSimilarity(normalized, normalizeText(prev)) > 0.7) {
+      return { passed: false, reason: 'high_similarity', suggestion: `Too similar to: "${prev.slice(0, 50)}..."` };
+    }
+  }
+
+  // Check 2: Length proportionality
+  const userLen = userMessage.trim().length;
+  const replyLen = reply.trim().length;
+  if (userLen <= 5 && replyLen > 80) {
+    return { passed: false, reason: 'overlong_for_short_message', suggestion: `User sent ${userLen} chars, reply should be 1 sentence max.` };
+  }
+  if (userLen < 20 && replyLen > userLen * 4) {
+    return { passed: false, reason: 'disproportionate_length', suggestion: `Reply ${replyLen} chars vs user ${userLen} chars — keep proportional.` };
+  }
+
+  // Check 3: Fact contradictions
+  const lower = reply.toLowerCase();
+  if (lower.includes('bada bhai') || lower.includes('bari bhai') || lower.includes('older brother')) {
+    return { passed: false, reason: 'identity_contradiction', suggestion: 'Mahir is chhota bhai, not bada bhai.' };
+  }
+  const ageMatch = lower.match(/(\d+)\s*(ka|saal|year|age)/);
+  if (ageMatch) {
+    const claimedAge = parseInt(ageMatch[1]);
+    if (claimedAge >= 25) {
+      const isChhotaBhai = history.some((e) => e.role === 'assistant' && e.content.toLowerCase().includes('chhota bhai'));
+      if (isChhotaBhai) {
+        return { passed: false, reason: 'age_contradiction', suggestion: `Claimed age ${claimedAge} but is "chhota bhai".` };
+      }
+    }
+  }
+
+  return { passed: true, reason: '', suggestion: '' };
+}
+
+// ============================================================
 // CLEAN UP AI RESPONSE
 // ============================================================
 
@@ -480,18 +580,35 @@ export async function generateReply(
   for (const provider of availableProviders) {
     try {
       console.log(`🚀 Trying ${provider.name}...`);
-      const reply = await provider.call(systemPrompt, senderMessage);
-      const cleaned = cleanReply(reply);
+      let reply = await provider.call(systemPrompt, senderMessage);
+      let cleaned = cleanReply(reply);
 
       if (cleaned.length > 0) {
-        // Track reply
-        trackReply(id, cleaned);
+        // Run response guard checks
+        const guardResult = runResponseGuardInternal(cleaned, senderMessage, id, conversationHistory);
 
-        // Save contact info (auto-learn from conversation)
-        learnFromConversation(id, senderName, senderMessage, cleaned, conversationHistory);
+        if (!guardResult.passed) {
+          console.log(`🛡️ Guard blocked reply (${guardResult.reason}): ${guardResult.suggestion}`);
+          // Try one more time with guard warning appended to prompt
+          const warningPrompt = systemPrompt + `\n\n⚠️ GUARD WARNING: Your previous reply had an issue: ${guardResult.reason}. ${guardResult.suggestion}. Fix this and generate a better reply.`;
+          reply = await provider.call(warningPrompt, senderMessage);
+          cleaned = cleanReply(reply);
+          console.log(`🔄 Regenerated reply: ${cleaned.slice(0, 60)}...`);
+        }
 
-        console.log(`✅ ${provider.name}: ${cleaned.slice(0, 60)}...`);
-        return makeResult(cleaned);
+        if (cleaned.length > 0) {
+          // Track reply
+          trackReply(id, cleaned);
+
+          // Record outgoing for duplicate detection
+          recordOutgoingInternal(id, cleaned);
+
+          // Save contact info (auto-learn from conversation)
+          learnFromConversation(id, senderName, senderMessage, cleaned, conversationHistory);
+
+          console.log(`✅ ${provider.name}: ${cleaned.slice(0, 60)}...`);
+          return makeResult(cleaned);
+        }
       }
     } catch (err: any) {
       if (is429Error(err)) {
