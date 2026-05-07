@@ -507,6 +507,40 @@ function cleanReply(text: string | undefined | null): string {
 const EXHAUSTED_MESSAGE = 'Ami akhon ektu busy achi, ektu pore kotha bolte paren. 🥲';
 
 // ============================================================
+// LLM ROUTING — Simple messages → Groq first, Complex → Gemini first
+// ============================================================
+
+function isSimpleMessage(userMessage: string): boolean {
+  const lower = userMessage.trim().toLowerCase();
+  const words = lower.split(/\s+/).filter(w => w.length > 0);
+
+  // Very short = simple
+  if (words.length <= 3) return true;
+
+  // Common simple patterns
+  const simplePatterns = [
+    /^(hi|hello|hey|hlo|hii|hlw|helo)\b/,
+    /^(bye|byee|by|goodnight|gn|tata)\b/,
+    /^(ok|okay|acha|accha|thik|theek|thk|tik)\b/,
+    /^(hmm|mm|hm|mmm)\b/,
+    /^(haan|han|ha|nahi|nhi|na|ni)\b/,
+    /^(kya|ky)\s+(kar|ho|hua|h)\b/,
+    /^(kaise|kese|kemon|kamon)\s+(ho|hau|asos|aso)\b/,
+    /^(suno|sun|bhai|bro)\b/,
+    /^(oh|oo|are|aare|arey)\b/,
+    /^(thanks|thank|thnks|shukriya|thnx)\b/,
+    /^(lol|haha|hehe)\b/,
+    /^(assalamualaikum|walaikumassalam|slm)\b/,
+  ];
+
+  for (const pattern of simplePatterns) {
+    if (pattern.test(lower)) return true;
+  }
+
+  return false;
+}
+
+// ============================================================
 // MAIN REPLY GENERATION
 // ============================================================
 
@@ -552,6 +586,19 @@ export async function generateReply(
 
   // Check if ALL providers are on cooldown
   const availableProviders = providers.filter(p => isProviderAvailable(p.name) && !isProviderOnCooldown(p.name));
+
+  // LLM Routing: Simple message → Groq gets priority (saves Gemini keys)
+  // Complex message → Gemini stays first
+  if (isSimpleMessage(senderMessage)) {
+    availableProviders.sort((a, b) => {
+      if (a.name === 'groq') return -1;
+      if (b.name === 'groq') return 1;
+      return 0;
+    });
+    if (availableProviders.length > 0 && availableProviders[0].name === 'groq') {
+      console.log('🔀 Simple message — Groq first');
+    }
+  }
 
   if (availableProviders.length === 0) {
     // Already sent exhausted message — try clarification instead of repeating
