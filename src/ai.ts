@@ -36,6 +36,7 @@ const providerCooldowns: Record<string, number> = {
   groq: 0,
   openrouter: 0,
   cohere: 0,
+  llmgtwy: 0,
 };
 
 // ============================================================
@@ -345,6 +346,17 @@ async function callCohere(systemPrompt: string, userMessage: string): Promise<st
   throw new Error('All Cohere keys exhausted');
 }
 
+async function callLlmGateway(systemPrompt: string, userMessage: string): Promise<string> {
+  return callOpenAICompatible(
+    'https://api.llmgateway.io/v1',
+    'gpt-4o-mini',
+    config.getLlmgtwyKeys(),
+    {},
+    systemPrompt,
+    userMessage
+  );
+}
+
 // ============================================================
 // PROVIDER REGISTRY
 // ============================================================
@@ -360,6 +372,7 @@ const providers: Provider[] = [
   { name: 'groq', call: callGroq },
   { name: 'openrouter', call: callOpenRouter },
   { name: 'cohere', call: callCohere },
+  { name: 'llmgtwy', call: callLlmGateway },
 ];
 
 function isProviderAvailable(name: string): boolean {
@@ -369,6 +382,7 @@ function isProviderAvailable(name: string): boolean {
     case 'groq': return config.getGroqKeys().length > 0;
     case 'openrouter': return config.getOpenRouterKeys().length > 0;
     case 'cohere': return config.getCohereKeys().length > 0;
+    case 'llmgtwy': return config.getLlmgtwyKeys().length > 0;
     default: return false;
   }
 }
