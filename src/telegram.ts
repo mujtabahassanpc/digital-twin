@@ -157,6 +157,25 @@ Ya phir /context file me instruction add kar de jisse Mahir agli baar samajh jay
   return sendTelegramMessage(text);
 }
 
+export async function sendInformAlert(
+  senderName: string,
+  senderId: string,
+  userMessage: string,
+  mahirReply: string
+): Promise<boolean> {
+  const text = `📢 <b>Mahir ne "Mujtaba ko bol dunga" kaha!</b>
+<b>From:</b> ${senderName} (${senderId})
+<b>User said:</b> "${userMessage.slice(0, 200)}"
+
+<b>Mahir replied:</b> "${mahirReply.slice(0, 300)}"
+
+⚠️ Mahir ne inform karne ka promise kiya hai. Tu iska reply de ya note kar le.
+
+— Mahir Abher`;
+
+  return sendTelegramMessage(text);
+}
+
 export async function sendStatusCommand(): Promise<boolean> {
   const { isConnected } = await import('./whatsapp.js');
   const message = `📊 <b>Mahir Status</b>
@@ -565,6 +584,112 @@ export async function handleTelegramCommand(command: string, args: string): Prom
         return sendTelegramMessage(text);
       } catch {
         return sendTelegramMessage('❌ Failed to read learning queue');
+      }
+    }
+
+    case 'script': {
+      const spaceIdx = args.indexOf(' ');
+      if (spaceIdx === -1) {
+        return sendTelegramMessage('Usage: /script <phone> <instruction>\n\nSets a scripted reply. When this person messages, Mahir will naturally say what you instructed.\n\nExample: /script 91987654321 bolo ki "aare haan muje yaad aaya Mujtaba ne ye bataya tha aapke liye..."');
+      }
+      const phone = args.substring(0, spaceIdx).trim();
+      const instruction = args.substring(spaceIdx + 1).trim();
+      if (!phone || !instruction) {
+        return sendTelegramMessage('❌ Phone number or instruction missing.\nUsage: /script <phone> <instruction>');
+      }
+      try {
+        const scriptPath = path.join(__dirname, '..', 'data', 'scripted_replies.json');
+        let data: Record<string, any> = {};
+        try { data = JSON.parse(fs.readFileSync(scriptPath, 'utf-8')); } catch { /* new file */ }
+        data[phone] = {
+          instruction,
+          active: true,
+          createdAt: new Date().toISOString(),
+          reported: false,
+        };
+        fs.writeFileSync(scriptPath, JSON.stringify(data, null, 2));
+        return sendTelegramMessage(`✅ Scripted reply set for <b>${phone}</b>\n\nWhen they message, Mahir will naturally incorporate your instruction and report back to you.\n\nInstruction: "${instruction.slice(0, 100)}${instruction.length > 100 ? '...' : ''}"`);
+      } catch {
+        return sendTelegramMessage('❌ Failed to save scripted reply');
+      }
+    }
+
+    case 'scriptlist': {
+      try {
+        const scriptPath = path.join(__dirname, '..', 'data', 'scripted_replies.json');
+        if (!fs.existsSync(scriptPath)) {
+          return sendTelegramMessage('📋 No scripted replies configured.');
+        }
+        const data = JSON.parse(fs.readFileSync(scriptPath, 'utf-8'));
+        const entries = Object.entries(data).filter(([, v]: any) => v.active);
+        if (entries.length === 0) {
+          return sendTelegramMessage('📋 No active scripted replies.');
+        }
+        let text = '📋 <b>Active Scripted Replies:</b>\n\n';
+        entries.forEach(([phone, info]: any) => {
+          const status = info.reported ? '✅ Executed & Reported' : '⏳ Waiting';
+          text += `<b>${phone}</b> — ${status}\n`;
+          text += `📝 ${info.instruction.slice(0, 80)}${info.instruction.length > 80 ? '...' : ''}\n\n`;
+        });
+        return sendTelegramMessage(text);
+      } catch {
+        return sendTelegramMessage('❌ Failed to read scripts');
+      }
+    }
+
+    case 'scriptdel': {
+      try {
+        const phone = args.trim();
+        if (!phone) return sendTelegramMessage('Usage: /scriptdel <phone>');
+        const scriptPath = path.join(__dirname, '..', 'data', 'scripted_replies.json');
+        const data = JSON.parse(fs.readFileSync(scriptPath, 'utf-8'));
+        if (data[phone]) {
+          delete data[phone];
+          fs.writeFileSync(scriptPath, JSON.stringify(data, null, 2));
+          return sendTelegramMessage(`✅ Script removed for ${phone}`);
+        }
+        return sendTelegramMessage(`❌ No script found for ${phone}`);
+      } catch {
+        return sendTelegramMessage('❌ Failed to delete script');
+      }
+    }
+
+    case 'relation': {
+      const spaceIdx = args.indexOf(' ');
+      if (spaceIdx === -1) {
+        return sendTelegramMessage('Usage: /relation <phone> <type>\n\nTypes: mom, dad, bibi/wife, friend, boss, bhai, didi, elder, stranger\n\nExample: /relation 91987654321 mom');
+      }
+      const phone = args.substring(0, spaceIdx).trim();
+      const relType = args.substring(spaceIdx + 1).trim().toLowerCase();
+      const validTypes = ['mom', 'dad', 'bibi', 'wife', 'friend', 'boss', 'bhai', 'brother', 'didi', 'sister', 'elder', 'stranger', 'client', 'teacher'];
+      if (!validTypes.includes(relType)) {
+        return sendTelegramMessage(`❌ Invalid type: ${relType}\nValid: ${validTypes.join(', ')}`);
+      }
+      try {
+        const contacts = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
+        if (!contacts.contacts[phone]) contacts.contacts[phone] = {};
+        contacts.contacts[phone].relationship = relType;
+        contacts.last_updated = new Date().toISOString();
+        fs.writeFileSync(contactsPath, JSON.stringify(contacts, null, 2));
+        const behaviorMap: Record<string, string> = {
+          mom: 'extra respectful, loving, use "aap", caring tone',
+          dad: 'respectful, formal, use "aap", obedient tone',
+          bibi: 'loving, warm, casual, close and comfortable',
+          wife: 'loving, warm, casual, close and comfortable',
+          friend: 'casual, playful, use "tum", relaxed',
+          boss: 'very respectful, formal, professional',
+          bhai: 'casual, brotherly, warm, use "tu/tum"',
+          brother: 'casual, brotherly, warm, use "tu/tum"',
+          didi: 'respectful, loving, use "aap"',
+          sister: 'respectful, loving, use "aap"',
+          elder: 'very respectful, use "aap", formal',
+          stranger: 'polite but cautious, formal',
+          client: 'professional, polite, helpful',
+          teacher: 'very respectful, formal, use "aap"',
+        };
+        return sendTelegramMessage(`✅ <b>${phone}</b> marked as <b>${relType}</b>\n\nMahir will behave: ${behaviorMap[relType] || 'accordingly'}`);
+      } catch {
+        return sendTelegramMessage('❌ Failed to save relationship');
       }
     }
 

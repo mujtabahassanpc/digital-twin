@@ -156,6 +156,21 @@ function processBatchedMessage(
       }
 
       console.log(`💬 AI Reply to ${senderName} (${messages.length} message(s)): ${result.text.slice(0, 80)}...`);
+
+      // --- Script execution report ---
+      if (result.scriptTriggered) {
+        const { sendTelegramMessage } = await import('./telegram.js');
+        await sendTelegramMessage(`📋 <b>Script Executed</b> for <b>${senderName}</b> (${senderId})\n\nMahir replied: "${result.text.slice(0, 200)}"\n\nOriginal instruction: "${result.scriptTriggered.slice(0, 150)}"`).catch(() => {});
+        // Mark script as reported
+        const { markScriptReported } = await import('./ai.js');
+        markScriptReported(senderId);
+      }
+
+      // --- "Acha Bolbo" / Inform Promise Detection ---
+      if (result.hasInformPromise) {
+        const { sendInformAlert } = await import('./telegram.js');
+        await sendInformAlert(senderName, senderId, combinedText, result.text).catch(() => {});
+      }
     } catch (error) {
       console.error('Error processing message:', error);
     }
@@ -393,6 +408,13 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
   async function start() {
     try {
       await initDatabase();
+
+      // Start DB size monitoring (check every 6 hours)
+      if (config.isDbReady()) {
+        checkDbSize();
+        setInterval(checkDbSize, 6 * 60 * 60 * 1000);
+      }
+
       const PORT = config.port;
       app.listen(PORT, () => {
         console.log(`\n🤖 Mahir Abher (Mujtaba ka Bhai) running on http://localhost:${PORT}`);
@@ -411,6 +433,44 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
   }
 
   start();
+}
+
+// DB Size Monitoring
+let dbAlertSent80 = false;
+let dbAlertSent90 = false;
+let dbAlertSent95 = false;
+
+async function checkDbSize() {
+  if (!config.isDbReady()) return;
+  try {
+    const result = await getPool().query(`SELECT pg_database_size(current_database()) as bytes`);
+    const bytes = parseInt(result.rows[0].bytes);
+    const mb = (bytes / (1024 * 1024)).toFixed(1);
+    const maxMb = 500; // Neon free tier: 500 MB
+    const pct = (parseFloat(mb) / maxMb) * 100;
+
+    if (pct >= 95 && !dbAlertSent95) {
+      dbAlertSent95 = true;
+      const { sendTelegramMessage } = await import('./telegram.js');
+      await sendTelegramMessage(`🚨 <b>Database at ${pct.toFixed(0)}% capacity!</b>\n\nUsed: ${mb} MB / ${maxMb} MB\n\n⚠️ Neon free tier almost full! Add second Neon DB soon. Use /status to check.`);
+      console.log(`🚨 DB at ${pct.toFixed(0)}% — alert sent`);
+    } else if (pct >= 90 && !dbAlertSent90) {
+      dbAlertSent90 = true;
+      const { sendTelegramMessage } = await import('./telegram.js');
+      await sendTelegramMessage(`⚠️ <b>Database at ${pct.toFixed(0)}% capacity</b>\n\nUsed: ${mb} MB / ${maxMb} MB\n\nPrepare to add second Neon DB soon.`);
+      console.log(`⚠️ DB at ${pct.toFixed(0)}% — alert sent`);
+    } else if (pct >= 80 && !dbAlertSent80) {
+      dbAlertSent80 = true;
+      const { sendTelegramMessage } = await import('./telegram.js');
+      await sendTelegramMessage(`📊 <b>Database at ${pct.toFixed(0)}%</b>\n\nUsed: ${mb} MB / ${maxMb} MB\n\nGetting there. Consider adding second Neon DB.`);
+      console.log(`📊 DB at ${pct.toFixed(0)}% — alert sent`);
+    }
+
+    // Log every check
+    console.log(`📊 DB size: ${mb} MB / ${maxMb} MB (${pct.toFixed(0)}%)`);
+  } catch (err) {
+    console.error('DB size check error:', err);
+  }
 }
 
 // Graceful Shutdown

@@ -15,6 +15,7 @@ const languageMatcherPath = path.join(dataDir, 'language_matcher.md');
 const conversationRulesPath = path.join(dataDir, 'conversation_rules.md');
 const aiGuidePath = path.join(dataDir, 'ai_guide.md');
 const styleProfilePath = path.join(dataDir, 'style_profile.json');
+const scriptedRepliesPath = path.join(dataDir, 'scripted_replies.json');
 
 // Per-sender reply tracking (bounded to prevent memory leaks)
 const recentReplies: Record<string, string[]> = {};
@@ -121,6 +122,30 @@ function loadStyleProfile(): string {
   } catch {
     return '';
   }
+}
+
+function loadScriptedReply(senderId: string): string {
+  try {
+    const raw = fs.readFileSync(scriptedRepliesPath, 'utf-8');
+    const data = JSON.parse(raw);
+    const script = data[senderId];
+    if (script && script.active && script.instruction) {
+      return script.instruction;
+    }
+  } catch { /* file doesn't exist or invalid */ }
+  return '';
+}
+
+function markScriptReported(senderId: string) {
+  try {
+    const raw = fs.readFileSync(scriptedRepliesPath, 'utf-8');
+    const data = JSON.parse(raw);
+    if (data[senderId]) {
+      data[senderId].reported = true;
+      data[senderId].lastReportedAt = new Date().toISOString();
+      fs.writeFileSync(scriptedRepliesPath, JSON.stringify(data, null, 2));
+    }
+  } catch { /* silent */ }
 }
 
 function saveContact(senderId: string, info: any) {
@@ -533,9 +558,11 @@ export interface GenerateReplyResult {
   metadata: ReplyMetadata;
   needsClarification: boolean;
   clarificationText: string;
+  scriptTriggered?: string; // script instruction that was injected
+  hasInformPromise?: boolean; // reply contains "acha bolbo" / "bol dunga" type promise
 }
 
-function makeResult(text: string, metadata?: Partial<ReplyMetadata>, clarification?: { needsClarification: boolean; text: string }): GenerateReplyResult {
+function makeResult(text: string, metadata?: Partial<ReplyMetadata>, clarification?: { needsClarification: boolean; text: string }, extras?: { scriptTriggered?: string; hasInformPromise?: boolean }): GenerateReplyResult {
   return {
     text,
     metadata: {
@@ -544,6 +571,8 @@ function makeResult(text: string, metadata?: Partial<ReplyMetadata>, clarificati
     },
     needsClarification: clarification?.needsClarification ?? false,
     clarificationText: clarification?.text ?? '',
+    scriptTriggered: extras?.scriptTriggered,
+    hasInformPromise: extras?.hasInformPromise,
   };
 }
 
@@ -608,6 +637,18 @@ export async function generateReply(
     ? '\n\n⚠️ NAME DETECTION: This person seems new (you have no saved info about them). If the conversation feels natural and you haven\'t asked yet, casually ask their name sometime soon. Don\'t be robotic — weave it into the conversation naturally. Like "acha btw tumhara naam kya hai?" or at the end of a friendly exchange.'
     : '';
 
+  // Scripted reply injection
+  const scriptInstruction = loadScriptedReply(id);
+  const scriptInjection = scriptInstruction
+    ? `\n\n📋 SCRIPTED REPLY INSTRUCTION (CRITICAL — FOLLOW THIS WHEN REPLYING): ${scriptInstruction}\nAfter replying naturally (not copy-paste), incorporate Mujtaba's instruction naturally into your response. THEN report back to Mujtaba via Telegram about what you said.`
+    : '';
+
+  // Relationship-based behavior
+  const contactData = contactsData.contacts[id];
+  const relationshipBehavior = contactData?.relationship
+    ? `\n\n👤 RELATIONSHIP CONTEXT: This person (${senderName || 'unknown'}) is your ${contactData.relationship}. Treat them accordingly with the appropriate respect and tone.`
+    : '';
+
   // Build system prompt
   const timeContext = getTimeContext();
   const systemPrompt = buildSystemPrompt(
@@ -616,7 +657,7 @@ export async function generateReply(
     contactInfo,
     languageExamples,
     timeContext,
-    conversationContext + nameAskInstruction,
+    conversationContext + nameAskInstruction + scriptInjection + relationshipBehavior,
     conversationHistory,
     senderName,
     aiGuide,
@@ -654,7 +695,8 @@ export async function generateReply(
           learnFromConversation(id, senderName, senderMessage, cleaned, conversationHistory);
 
           console.log(`✅ ${provider.name}: ${cleaned.slice(0, 60)}...`);
-          return makeResult(cleaned);
+          const hasInform = /(acha bolbo|bol dunga|ko bol|inform|tell|bata dunga|puchke bat|pore bol|Mujtaba ko)/i.test(cleaned);
+          return makeResult(cleaned, {}, undefined, { scriptTriggered: scriptInstruction, hasInformPromise: hasInform });
         }
       }
     } catch (err: any) {
@@ -773,4 +815,4 @@ export function isAnyProviderAvailable(): boolean {
   return providers.some(p => isProviderAvailable(p.name) && !isProviderOnCooldown(p.name));
 }
 
-export { loadPersonality, loadContext, saveContact };
+export { loadPersonality, loadContext, saveContact, markScriptReported };
