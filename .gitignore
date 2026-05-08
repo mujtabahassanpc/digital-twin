@@ -6,3 +6,5 @@ data/*.json
 auth_info_baileys/
 
 .vercel
+
+.scratch/

@@ -1,5 +1,5 @@
 import { config } from './config.js';
-import { getConversationHistory } from './db.js';
+import { getConversationHistory, getPool } from './db.js';
 import fs from 'fs';
 import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -171,12 +171,8 @@ export async function sendStatusCommand(): Promise<boolean> {
 }
 
 export async function sendContactsCommand(limit: number = 10): Promise<boolean> {
-  const { Pool } = await import('pg');
   try {
-    const pool = new Pool({
-      connectionString: config.databaseUrl,
-      ssl: { rejectUnauthorized: false },
-    });
+    const pool = getPool();
 
     const result = await pool.query(
       `SELECT phone_number, name, message_count, last_active
@@ -192,7 +188,7 @@ export async function sendContactsCommand(limit: number = 10): Promise<boolean> 
    ${r.message_count} msgs • last: ${timeAgo}`;
     }).join('\n\n');
 
-    await pool.end();
+    // Don't close — using singleton pool
 
     const message = `👥 <b>Recent Contacts</b>\n\n${list || 'No contacts yet'}\n\n— Mahir Abher`;
     return sendTelegramMessage(message);
@@ -290,17 +286,13 @@ export async function handleTelegramCommand(command: string, args: string): Prom
 
     case 'digest':
       const { sendDailyDigest } = await import('./telegram.js');
-      const { Pool } = await import('pg');
       try {
-        const pool = new Pool({
-          connectionString: config.databaseUrl,
-          ssl: { rejectUnauthorized: false },
-        });
+        const pool = getPool();
         const today = new Date().toISOString().split('T')[0];
         const totalResult = await pool.query(`SELECT COUNT(*) FROM conversations WHERE DATE(timestamp) = $1`, [today]);
         const contactsResult = await pool.query(`SELECT sender_name, COUNT(*) as count FROM conversations WHERE DATE(timestamp) = $1 GROUP BY sender_name ORDER BY count DESC LIMIT 5`, [today]);
         const importantResult = await pool.query(`SELECT sender_name, content FROM conversations WHERE DATE(timestamp) = $1 AND LENGTH(content) > 50 AND message_type = 'incoming' ORDER BY timestamp DESC LIMIT 5`, [today]);
-        await pool.end();
+        // Don't close pool — using singleton
 
         return sendDailyDigest({
           totalMessages: parseInt(totalResult.rows[0].count),

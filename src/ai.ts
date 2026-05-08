@@ -3,6 +3,7 @@ import fs from 'fs';
 import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { config } from './config.js';
+import { runResponseGuard, recordOutgoing, ConversationEntry } from './response_guard.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, '..', 'data');
@@ -12,6 +13,8 @@ const contactsPath = path.join(dataDir, 'contacts.json');
 const languageExamplesPath = path.join(dataDir, 'language_examples.json');
 const languageMatcherPath = path.join(dataDir, 'language_matcher.md');
 const conversationRulesPath = path.join(dataDir, 'conversation_rules.md');
+const aiGuidePath = path.join(dataDir, 'ai_guide.md');
+const styleProfilePath = path.join(dataDir, 'style_profile.json');
 
 // Per-sender reply tracking (bounded to prevent memory leaks)
 const recentReplies: Record<string, string[]> = {};
@@ -96,6 +99,30 @@ function loadConversationRules(): string {
   return loadFile(conversationRulesPath);
 }
 
+function loadAiGuide(): string {
+  return loadFile(aiGuidePath);
+}
+
+function loadStyleProfile(): string {
+  try {
+    const raw = fs.readFileSync(styleProfilePath, 'utf-8');
+    const profile = JSON.parse(raw);
+    let text = '## STYLE PROFILE (your speaking style from chat analysis)\n';
+    text += `- Tone: ${profile.tone || 'casual_friendly'}\n`;
+    if (profile.common_emojis?.length) text += `- Common emojis: ${profile.common_emojis.slice(0, 7).join(' ')}\n`;
+    if (profile.greetings?.length) text += `- Natural greetings: ${profile.greetings.slice(0, 10).join(', ')}\n`;
+    if (profile.slang_words?.length) text += `- Your slang: ${profile.slang_words.slice(0, 15).join(', ')}\n`;
+    if (profile.deflection_phrases?.length) text += `- Deflection phrases (use when needed): ${profile.deflection_phrases.slice(0, 5).join(' | ')}\n`;
+    if (profile.response_style) {
+      text += `- Reply length: avg ${profile.response_style.avg_length_chars || 60} chars, max ${profile.response_style.max_length_chars || 150}\n`;
+    }
+    text += '\n';
+    return text;
+  } catch {
+    return '';
+  }
+}
+
 function saveContact(senderId: string, info: any) {
   const data = loadContacts();
   data.contacts[senderId] = {
@@ -109,6 +136,22 @@ function saveContact(senderId: string, info: any) {
   } catch {
     // silent
   }
+}
+
+// Credit tracking for multi-DB fallback (Neon free tier)
+let dbCreditsUsed = 0;
+const DB_CREDIT_LIMIT = 100; // messages per cycle, adjust as needed
+
+export function getDbCreditsUsed(): number {
+  return dbCreditsUsed;
+}
+
+export function incrementDbCredits() {
+  dbCreditsUsed++;
+}
+
+export function resetDbCredits() {
+  dbCreditsUsed = 0;
 }
 
 // ============================================================
@@ -172,20 +215,20 @@ function buildSystemPrompt(
   timeContext: string,
   conversationContext: string,
   history: any[],
-  senderName?: string
+  senderName?: string,
+  aiGuide?: string,
+  styleProfile?: string,
 ): string {
   let prompt = `${personality}\n\n`;
 
-  // Language matching rules (NEW)
-  const languageMatcher = loadLanguageMatcher();
-  if (languageMatcher) {
-    prompt += `## LANGUAGE MATCHING (CRITICAL — FOLLOW THESE RULES)\n${languageMatcher}\n\n`;
+  // AI Guide (additional behavioral rules)
+  if (aiGuide) {
+    prompt += `## AI GUIDE (additional instructions)\n${aiGuide}\n\n`;
   }
 
-  // Conversation rules (NEW)
-  const conversationRules = loadConversationRules();
-  if (conversationRules) {
-    prompt += `## CONVERSATION RULES (CRITICAL — FOLLOW THESE RULES)\n${conversationRules}\n\n`;
+  // Style profile from chat analysis
+  if (styleProfile) {
+    prompt += `${styleProfile}\n`;
   }
 
   // Current context (dynamic)
@@ -425,84 +468,6 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, maxRetries: number = 2)
 }
 
 // ============================================================
-// RESPONSE GUARD (inline to avoid circular deps)
-// ============================================================
-
-const recentOutgoing: Record<string, string[]> = {};
-const MAX_OUTGOING_PER_SENDER = 10;
-
-function recordOutgoingInternal(senderId: string, reply: string) {
-  if (!recentOutgoing[senderId]) recentOutgoing[senderId] = [];
-  recentOutgoing[senderId].push(reply);
-  if (recentOutgoing[senderId].length > MAX_OUTGOING_PER_SENDER) {
-    recentOutgoing[senderId] = recentOutgoing[senderId].slice(-MAX_OUTGOING_PER_SENDER);
-  }
-}
-
-function normalizeText(text: string): string {
-  return text.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
-}
-
-function wordSetSimilarity(a: string, b: string): number {
-  const wordsA = new Set(a.split(' ').filter((w) => w.length > 2));
-  const wordsB = new Set(b.split(' ').filter((w) => w.length > 2));
-  if (wordsA.size === 0 || wordsB.size === 0) return 0;
-  let overlap = 0;
-  for (const w of wordsA) {
-    if (wordsB.has(w)) overlap++;
-  }
-  return overlap / Math.max(wordsA.size, wordsB.size);
-}
-
-interface GuardResult {
-  passed: boolean;
-  reason: string;
-  suggestion: string;
-}
-
-function runResponseGuardInternal(reply: string, userMessage: string, senderId: string, history: ConversationEntry[]): GuardResult {
-  // Check 1: Duplicate detection
-  const historyOutgoing = recentOutgoing[senderId] || [];
-  const normalized = normalizeText(reply);
-  for (const prev of historyOutgoing) {
-    if (normalized === normalizeText(prev)) {
-      return { passed: false, reason: 'exact_duplicate', suggestion: 'Reply is identical to a recent message.' };
-    }
-    if (wordSetSimilarity(normalized, normalizeText(prev)) > 0.7) {
-      return { passed: false, reason: 'high_similarity', suggestion: `Too similar to: "${prev.slice(0, 50)}..."` };
-    }
-  }
-
-  // Check 2: Length proportionality
-  const userLen = userMessage.trim().length;
-  const replyLen = reply.trim().length;
-  if (userLen <= 5 && replyLen > 80) {
-    return { passed: false, reason: 'overlong_for_short_message', suggestion: `User sent ${userLen} chars, reply should be 1 sentence max.` };
-  }
-  if (userLen < 20 && replyLen > userLen * 4) {
-    return { passed: false, reason: 'disproportionate_length', suggestion: `Reply ${replyLen} chars vs user ${userLen} chars — keep proportional.` };
-  }
-
-  // Check 3: Fact contradictions
-  const lower = reply.toLowerCase();
-  if (lower.includes('bada bhai') || lower.includes('bari bhai') || lower.includes('older brother')) {
-    return { passed: false, reason: 'identity_contradiction', suggestion: 'Mahir is chhota bhai, not bada bhai.' };
-  }
-  const ageMatch = lower.match(/(\d+)\s*(ka|saal|year|age)/);
-  if (ageMatch) {
-    const claimedAge = parseInt(ageMatch[1]);
-    if (claimedAge >= 25) {
-      const isChhotaBhai = history.some((e) => e.role === 'assistant' && e.content.toLowerCase().includes('chhota bhai'));
-      if (isChhotaBhai) {
-        return { passed: false, reason: 'age_contradiction', suggestion: `Claimed age ${claimedAge} but is "chhota bhai".` };
-      }
-    }
-  }
-
-  return { passed: true, reason: '', suggestion: '' };
-}
-
-// ============================================================
 // CLEAN UP AI RESPONSE
 // ============================================================
 
@@ -557,11 +522,6 @@ function isSimpleMessage(userMessage: string): boolean {
 // ============================================================
 // MAIN REPLY GENERATION
 // ============================================================
-
-export interface ConversationEntry {
-  role: 'user' | 'assistant';
-  content: string;
-}
 
 export interface ReplyMetadata {
   typingDelay: number;
@@ -636,6 +596,8 @@ export async function generateReply(
   const contactsData = loadContacts();
   const contactInfo = contactsData.contacts[id] ? JSON.stringify(contactsData.contacts[id], null, 2) : '';
   const languageExamples = loadLanguageExamples();
+  const aiGuide = loadAiGuide();
+  const styleProfile = loadStyleProfile();
 
   // Analyze conversation context naturally (no hardcoded phrases)
   const conversationContext = getConversationContext(senderMessage, conversationHistory);
@@ -656,7 +618,9 @@ export async function generateReply(
     timeContext,
     conversationContext + nameAskInstruction,
     conversationHistory,
-    senderName
+    senderName,
+    aiGuide,
+    styleProfile,
   );
 
   // Try each available provider
@@ -668,7 +632,7 @@ export async function generateReply(
 
       if (cleaned.length > 0) {
         // Run response guard checks
-        const guardResult = runResponseGuardInternal(cleaned, senderMessage, id, conversationHistory);
+        const guardResult = runResponseGuard(cleaned, senderMessage, id, conversationHistory);
 
         if (!guardResult.passed) {
           console.log(`🛡️ Guard blocked reply (${guardResult.reason}): ${guardResult.suggestion}`);
@@ -684,7 +648,7 @@ export async function generateReply(
           trackReply(id, cleaned);
 
           // Record outgoing for duplicate detection
-          recordOutgoingInternal(id, cleaned);
+          recordOutgoing(id, cleaned);
 
           // Save contact info (auto-learn from conversation)
           learnFromConversation(id, senderName, senderMessage, cleaned, conversationHistory);
@@ -786,6 +750,27 @@ function trackReply(senderId: string, reply: string) {
   if (!recentReplies[senderId]) recentReplies[senderId] = [];
   recentReplies[senderId].push(reply);
   if (recentReplies[senderId].length > 15) recentReplies[senderId] = recentReplies[senderId].slice(-15);
+}
+
+export interface ProviderStatus {
+  name: string;
+  onCooldown: boolean;
+  cooldownRemaining: number;
+}
+
+export function getProviderStatuses(): ProviderStatus[] {
+  return providers.map(p => ({
+    name: p.name,
+    available: isProviderAvailable(p.name),
+    onCooldown: isProviderOnCooldown(p.name),
+    cooldownRemaining: isProviderOnCooldown(p.name)
+      ? Math.max(0, Math.round((providerCooldowns[p.name] - Date.now()) / 1000))
+      : 0,
+  }));
+}
+
+export function isAnyProviderAvailable(): boolean {
+  return providers.some(p => isProviderAvailable(p.name) && !isProviderOnCooldown(p.name));
 }
 
 export { loadPersonality, loadContext, saveContact };

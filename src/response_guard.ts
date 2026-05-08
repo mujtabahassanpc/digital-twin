@@ -1,4 +1,7 @@
-import { ConversationEntry } from './ai.js';
+export interface ConversationEntry {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 // Track recent outgoing messages per sender for duplicate detection
 const outgoingHistory: Record<string, string[]> = {};

@@ -4,8 +4,8 @@ import fs from 'fs';
 import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { config } from './config.js';
-import { initDatabase } from './db.js';
-import { generateReply } from './ai.js';
+import { initDatabase, getPool, closePool } from './db.js';
+import { generateReply, getProviderStatuses, isAnyProviderAvailable, getDbCreditsUsed, resetDbCredits } from './ai.js';
 import { saveMessage, getConversationHistory } from './db.js';
 import { startWhatsApp, sendWhatsAppMessage, showTyping, getQRCode, isConnected, whatsappEmitter } from './whatsapp.js';
 import { sendInstantAlert, sendImportantConversationAlert, handleTelegramCommand } from './telegram.js';
@@ -111,23 +111,22 @@ function processBatchedMessage(
         const { sendConfusionAlert } = await import('./telegram.js');
         await sendConfusionAlert(senderName, senderId, combinedText, history);
 
-        // --- Save to learning queue ---
+        // --- Save to learning queue (async) ---
         const queuePath = path.join(__dirname, '..', 'data', 'learning_queue.json');
-        let queue: any[] = [];
         try {
-          queue = JSON.parse(fs.readFileSync(queuePath, 'utf-8'));
-        } catch { /* file doesn't exist yet */ }
-        queue.push({
-          timestamp: new Date().toISOString(),
-          senderId,
-          senderName,
-          userMessage: combinedText,
-          context: history.slice(-4).map(h => `${h.role}: ${h.content}`).join('\n'),
-          status: 'new',
-        });
-        if (queue.length > 50) queue = queue.slice(-50);
-        fs.writeFileSync(queuePath, JSON.stringify(queue, null, 2));
-        // --- end learning queue ---
+          const raw = await fs.promises.readFile(queuePath, 'utf-8').catch(() => '[]');
+          let queue = JSON.parse(raw);
+          queue.push({
+            timestamp: new Date().toISOString(),
+            senderId,
+            senderName,
+            userMessage: combinedText,
+            context: history.slice(-4).map(h => `${h.role}: ${h.content}`).join('\n'),
+            status: 'new',
+          });
+          if (queue.length > 50) queue = queue.slice(-50);
+          await fs.promises.writeFile(queuePath, JSON.stringify(queue, null, 2));
+        } catch { /* silent */ }
 
         return;
       }
@@ -299,6 +298,17 @@ app.get('/health', (_req, res) => {
   });
 });
 
+// Provider health dashboard
+app.get('/api/providers', (_req, res) => {
+  const statuses = getProviderStatuses();
+  res.json({
+    timestamp: new Date().toISOString(),
+    providers: statuses,
+    anyAvailable: isAnyProviderAvailable(),
+    dbCreditsUsed: getDbCreditsUsed(),
+  });
+});
+
 app.get('/api/test', (_req, res) => {
   res.json({
     status: 'ok',
@@ -317,13 +327,9 @@ app.post('/api/toggle', (_req, res) => {
 
 app.post('/api/digest', async (_req, res) => {
   const { sendDailyDigest } = await import('./telegram.js');
-  const { Pool } = await import('pg');
 
   try {
-    const pool = new Pool({
-      connectionString: config.databaseUrl,
-      ssl: { rejectUnauthorized: false },
-    });
+    const pool = getPool();
 
     const today = new Date().toISOString().split('T')[0];
     const totalResult = await pool.query(
@@ -348,8 +354,6 @@ app.post('/api/digest', async (_req, res) => {
     const importantHighlights = importantResult.rows.map(
       (r) => `${r.sender_name || 'Unknown'}: ${r.content.substring(0, 100)}`
     );
-
-    await pool.end();
 
     const sent = await sendDailyDigest({
       totalMessages,
@@ -408,3 +412,30 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 
   start();
 }
+
+// Graceful Shutdown
+async function shutdownGracefully(signal: string) {
+  console.log(`\n🛑 Received ${signal} — shutting down gracefully...`);
+
+  // Flush message batch buffers (process remaining)
+  for (const [senderId, buffer] of Object.entries(messageBuffers)) {
+    clearTimeout(buffer.timer);
+    if (buffer.messages.length > 0) {
+      const combined = buffer.messages.map(m => m.text).join('\n');
+      console.log(`🔄 Flushing ${buffer.messages.length} queued message(s) from ${senderId}`);
+      processBatchedMessage(senderId, 'unknown', combined).catch(() => {});
+    }
+  }
+
+  // Give time for last messages to send
+  await new Promise(r => setTimeout(r, 2000));
+
+  // Close DB pool
+  await closePool().catch(() => {});
+
+  console.log('👋 Goodbye!');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdownGracefully('SIGTERM'));
+process.on('SIGINT', () => shutdownGracefully('SIGINT'));

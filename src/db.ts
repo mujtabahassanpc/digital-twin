@@ -124,3 +124,12 @@ export async function getConversationHistory(
     return [];
   }
 }
+
+export async function closePool() {
+  if (pool) {
+    await pool.end();
+    pool = null;
+  }
+}
+
+export { getPool };
