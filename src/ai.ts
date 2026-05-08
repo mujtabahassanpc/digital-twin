@@ -108,16 +108,13 @@ function loadStyleProfile(): string {
   try {
     const raw = fs.readFileSync(styleProfilePath, 'utf-8');
     const profile = JSON.parse(raw);
-    let text = '## STYLE PROFILE (your speaking style from chat analysis)\n';
-    text += `- Tone: ${profile.tone || 'casual_friendly'}\n`;
-    if (profile.common_emojis?.length) text += `- Common emojis: ${profile.common_emojis.slice(0, 7).join(' ')}\n`;
-    if (profile.greetings?.length) text += `- Natural greetings: ${profile.greetings.slice(0, 10).join(', ')}\n`;
-    if (profile.slang_words?.length) text += `- Your slang: ${profile.slang_words.slice(0, 15).join(', ')}\n`;
-    if (profile.deflection_phrases?.length) text += `- Deflection phrases (use when needed): ${profile.deflection_phrases.slice(0, 5).join(' | ')}\n`;
-    if (profile.response_style) {
-      text += `- Reply length: avg ${profile.response_style.avg_length_chars || 60} chars, max ${profile.response_style.max_length_chars || 150}\n`;
-    }
-    text += '\n';
+    let text = '## STYLE REFERENCE (for understanding, not copying)\n';
+    text += `Your usual tone is: ${profile.tone || 'casual_friendly'}\n`;
+    text += `Common emojis people use around you: ${(profile.common_emojis || []).slice(0, 7).join(' ')}\n`;
+    text += `Greetings you may encounter: ${(profile.greetings || []).slice(0, 5).join(', ')}\n`;
+    text += `Words people use in conversation: ${(profile.slang_words || []).slice(0, 8).join(', ')}\n`;
+    text += `\nIMPORTANT: These are words OTHERS might use. Do NOT repeat them. Use your own natural words.\n`;
+    text += `\n`;
     return text;
   } catch {
     return '';
@@ -578,34 +575,37 @@ function cleanReply(text: string | undefined | null): string {
 const EXHAUSTED_MESSAGE = 'Ami akhon ektu busy achi, ektu pore kotha bolte paren. 🥲';
 
 // ============================================================
-// LLM ROUTING — Simple messages → Groq first, Complex → Gemini first
-// ============================================================
+// LLM Routing — Simple messages → Groq first, Complex → Gemini first
+// Only for TRUE simple messages (greetings, bye, yes/no, single word)
+// NOT for short messages in ongoing conversations
 
 function isSimpleMessage(userMessage: string): boolean {
   const lower = userMessage.trim().toLowerCase();
   const words = lower.split(/\s+/).filter(w => w.length > 0);
+  if (words.length === 0) return false;
 
-  // Very short = simple
-  if (words.length <= 3) return true;
+  // Ultra-short: single word or very short
+  if (words.length === 1) {
+    const singlePatterns = [/^(hi|hello|hey|hlo|hii|hlw|helo|by|bye|byee|gn|goodnight|ok|okay|acha|haan|han|ha|nahi|nhi|na|ni|hmm|mm|hm|thanks|thank|thnx|lol|haha|hehe|oh|oy|aare|are|arey)$/];
+    for (const p of singlePatterns) {
+      if (p.test(words[0])) return true;
+    }
+    return false;
+  }
 
-  // Common simple patterns
-  const simplePatterns = [
-    /^(hi|hello|hey|hlo|hii|hlw|helo)\b/,
-    /^(bye|byee|by|goodnight|gn|tata)\b/,
-    /^(ok|okay|acha|accha|thik|theek|thk|tik)\b/,
-    /^(hmm|mm|hm|mmm)\b/,
-    /^(haan|han|ha|nahi|nhi|na|ni)\b/,
-    /^(kya|ky)\s+(kar|ho|hua|h)\b/,
-    /^(kaise|kese|kemon|kamon)\s+(ho|hau|asos|aso)\b/,
-    /^(suno|sun|bhai|bro)\b/,
-    /^(oh|oo|are|aare|arey)\b/,
-    /^(thanks|thank|thnks|shukriya|thnx)\b/,
-    /^(lol|haha|hehe)\b/,
-    /^(assalamualaikum|walaikumassalam|slm)\b/,
-  ];
+  if (words.length === 2) {
+    const twoWordPatterns = [/^(assalamualaikum|walaikumassalam)$/, /^(kit|ky)\s+(a|kar)$/];
+    const joined = words.join(' ');
+    for (const p of twoWordPatterns) {
+      if (p.test(joined)) return true;
+    }
+    return false;
+  }
 
-  for (const pattern of simplePatterns) {
-    if (pattern.test(lower)) return true;
+  // 3 words max and only if it's clearly a greeting
+  if (words.length === 3) {
+    const threeWord = words.join(' ');
+    if (/^(kamon asos|kita kbr|kemon aso|kaise ho|kya kar|kya hua|kya baat)$/i.test(threeWord)) return true;
   }
 
   return false;
