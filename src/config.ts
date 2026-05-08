@@ -30,10 +30,13 @@ export const config = {
   // LLM Gateway
   llmgtwyApiKeys: optionalEnv('LLMGTWY_API_KEYS', ''),
 
-  // Google Cloud (for Speech-to-Text)
+  // Sarvam AI (Indian language STT, free LLM sarvaM-m, TTS, Translation)
+  sarvamApiKeys: optionalEnv('SARVAM_API_KEYS', ''),
+
+  // Google Cloud (for Speech-to-Text — fallback if Sarvam fails)
   googleCloudApiKey: optionalEnv('GOOGLE_CLOUD_API_KEY', ''),
 
-  // Media Processing (images via Gemini Vision, voice via Google STT)
+  // Media Processing (images via Gemini Vision, voice via Sarvam STT)
   mediaProcessing: process.env.MEDIA_PROCESSING === 'true',
 
   // Neon Database
@@ -51,7 +54,8 @@ export const config = {
   isAiReady(): boolean {
     return this.getGeminiKeys().length > 0 || this.getMistralKeys().length > 0 ||
            this.getGroqKeys().length > 0 || this.getOpenRouterKeys().length > 0 ||
-           this.getCohereKeys().length > 0 || this.getLlmgtwyKeys().length > 0;
+           this.getCohereKeys().length > 0 || this.getLlmgtwyKeys().length > 0 ||
+           this.getSarvamKeys().length > 0;
   },
 
   // Get all active keys for each provider
@@ -67,6 +71,7 @@ export const config = {
   getOpenRouterKeys(): string[] { return parseKeys(this.openRouterApiKeys); },
   getCohereKeys(): string[] { return parseKeys(this.cohereApiKeys); },
   getLlmgtwyKeys(): string[] { return parseKeys(this.llmgtwyApiKeys); },
+  getSarvamKeys(): string[] { return parseKeys(this.sarvamApiKeys); },
 
   isDbReady(): boolean { return !!this.databaseUrl; },
   isTelegramReady(): boolean { return !!(this.telegramBotToken && this.telegramChatId); },

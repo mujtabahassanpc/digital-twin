@@ -7,14 +7,9 @@ import { runResponseGuard, recordOutgoing, ConversationEntry } from './response_
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, '..', 'data');
-const personalityPath = path.join(dataDir, 'personality.md');
+const instructionsPath = path.join(dataDir, 'mahir_instructions.md');
 const contextPath = path.join(dataDir, 'context.md');
 const contactsPath = path.join(dataDir, 'contacts.json');
-const languageExamplesPath = path.join(dataDir, 'language_examples.json');
-const languageMatcherPath = path.join(dataDir, 'language_matcher.md');
-const conversationRulesPath = path.join(dataDir, 'conversation_rules.md');
-const aiGuidePath = path.join(dataDir, 'ai_guide.md');
-const styleProfilePath = path.join(dataDir, 'style_profile.json');
 const scriptedRepliesPath = path.join(dataDir, 'scripted_replies.json');
 
 // Per-sender reply tracking (bounded to prevent memory leaks)
@@ -27,7 +22,6 @@ const exhaustedSent: Record<string, boolean> = {};
 function pruneExhaustedSent() {
   const keys = Object.keys(exhaustedSent);
   if (keys.length > MAX_TRACKED_SENDERS) {
-    // Remove oldest entries
     const toRemove = keys.slice(0, keys.length - MAX_TRACKED_SENDERS);
     for (const k of toRemove) delete exhaustedSent[k];
   }
@@ -41,6 +35,7 @@ const providerCooldowns: Record<string, number> = {
   openrouter: 0,
   cohere: 0,
   llmgtwy: 0,
+  sarvam: 0,
 };
 
 // ============================================================
@@ -55,8 +50,8 @@ function loadFile(filePath: string): string {
   }
 }
 
-function loadPersonality(): string {
-  return loadFile(personalityPath);
+function loadMahirInstructions(): string {
+  return loadFile(instructionsPath);
 }
 
 function loadContext(): string {
@@ -69,55 +64,6 @@ function loadContacts(): Record<string, any> {
     return JSON.parse(raw);
   } catch {
     return { contacts: {}, last_updated: new Date().toISOString() };
-  }
-}
-
-function loadLanguageExamples(): string {
-  try {
-    const raw = fs.readFileSync(languageExamplesPath, 'utf-8');
-    const data = JSON.parse(raw);
-    const examples = data.examples || [];
-    if (examples.length === 0) return '';
-
-    // Format examples for the system prompt
-    let text = 'LANGUAGE EXAMPLES (learned from Mujtaba):\n';
-    // Show last 30 examples (most recent)
-    const recent = examples.slice(-30);
-    for (const ex of recent) {
-      text += `- Message: "${ex.message}"\n  Why: ${ex.reason}\n`;
-    }
-    return text;
-  } catch {
-    return '';
-  }
-}
-
-function loadLanguageMatcher(): string {
-  return loadFile(languageMatcherPath);
-}
-
-function loadConversationRules(): string {
-  return loadFile(conversationRulesPath);
-}
-
-function loadAiGuide(): string {
-  return loadFile(aiGuidePath);
-}
-
-function loadStyleProfile(): string {
-  try {
-    const raw = fs.readFileSync(styleProfilePath, 'utf-8');
-    const profile = JSON.parse(raw);
-    let text = '## STYLE REFERENCE (for understanding, not copying)\n';
-    text += `Your usual tone is: ${profile.tone || 'casual_friendly'}\n`;
-    text += `Common emojis people use around you: ${(profile.common_emojis || []).slice(0, 7).join(' ')}\n`;
-    text += `Greetings you may encounter: ${(profile.greetings || []).slice(0, 5).join(', ')}\n`;
-    text += `Words people use in conversation: ${(profile.slang_words || []).slice(0, 8).join(', ')}\n`;
-    text += `\nIMPORTANT: These are words OTHERS might use. Do NOT repeat them. Use your own natural words.\n`;
-    text += `\n`;
-    return text;
-  } catch {
-    return '';
   }
 }
 
@@ -162,7 +108,7 @@ function saveContact(senderId: string, info: any) {
 
 // Credit tracking for multi-DB fallback (Neon free tier)
 let dbCreditsUsed = 0;
-const DB_CREDIT_LIMIT = 100; // messages per cycle, adjust as needed
+const DB_CREDIT_LIMIT = 100;
 
 export function getDbCreditsUsed(): number {
   return dbCreditsUsed;
@@ -177,102 +123,31 @@ export function resetDbCredits() {
 }
 
 // ============================================================
-// SENTIMENT DETECTION (zero-cost, keyword-based)
-// ============================================================
-
-function detectUserSentiment(userMessage: string): string {
-  const lower = userMessage.toLowerCase();
-  if (/\b(sad|dukhi|rona|tension|tens|pareshan|grave|udas|tension me)\b/.test(lower))
-    return 'User seems sad or stressed. Reply with empathy, maybe ask if they want to talk.';
-  if (/\b(angry|gussa|chhod|nafrat|bahut ho gaya|uff|pagal|bewakoof|kutta|kutte)\b/.test(lower))
-    return 'User sounds angry or frustrated. Apologize if appropriate, stay calm.';
-  if (/\b(urgent|emergency|help|jaldi|zaroori|problem|call|madad)\b/.test(lower))
-    return 'This seems urgent. Show concern, ask what they need immediately.';
-  if (/\b(happy|maza|achi|shukriya|thanks|mubarak|alhamdulillah|bala|mast|badhiya)\b/.test(lower))
-    return 'User is in a good mood. Match their positive energy.';
-  return '';
-}
-
-// ============================================================
-// CONVERSATION CONTEXT ANALYSIS
-// Let the AI detect context naturally from history, not hardcoded phrases
-// ============================================================
-
-function getConversationContext(userMessage: string, history: any[]): string {
-  const lower = userMessage.toLowerCase().trim();
-  const msgLen = userMessage.trim().length;
-
-  // Check if user's message is very short (likely an ending signal)
-  const isShortResponse = msgLen < 5;
-
-  // Check if conversation has been going on and user is giving short responses
-  const recentUser = history.filter((e: any) => e.role === 'user').slice(-3);
-  const allShort = recentUser.length >= 2 && recentUser.every((e: any) => e.content.trim().length < 6);
-
-  if (isShortResponse && allShort) {
-    return '⚠️ User is giving very short responses — they may want to end the conversation. Keep your reply minimal and do not ask new questions.' + appendSentiment(userMessage);
-  }
-
-  if (isShortResponse) {
-    return 'User gave a very short response. Match their energy — keep your reply short and natural.' + appendSentiment(userMessage);
-  }
-
-  return 'User is actively engaged. Respond naturally to what they said.' + appendSentiment(userMessage);
-}
-
-function appendSentiment(userMessage: string): string {
-  const sentiment = detectUserSentiment(userMessage);
-  return sentiment ? '\n[Emotional context]: ' + sentiment : '';
-}
-
-// ============================================================
 // SYSTEM PROMPT BUILDER
 // ============================================================
 
 function buildSystemPrompt(
-  personality: string,
+  instructions: string,
   context: string,
   contactInfo: string,
-  languageExamples: string,
   timeContext: string,
-  conversationContext: string,
   history: any[],
   senderName?: string,
-  aiGuide?: string,
-  styleProfile?: string,
 ): string {
-  let prompt = `${personality}\n\n`;
+  let prompt = `${instructions}\n\n`;
 
-  // AI Guide (additional behavioral rules)
-  if (aiGuide) {
-    prompt += `## AI GUIDE (additional instructions)\n${aiGuide}\n\n`;
-  }
-
-  // Style profile from chat analysis
-  if (styleProfile) {
-    prompt += `${styleProfile}\n`;
-  }
-
-  // Current context (dynamic)
+  // Current context (dynamic situation, if any)
   if (context) {
     prompt += `CURRENT SITUATION:\n${context}\n\n`;
   }
 
-  // Contact memory
+  // Contact memory (what Mahir knows about this person)
   if (contactInfo) {
     prompt += `WHAT YOU KNOW ABOUT THIS PERSON:\n${contactInfo}\n\n`;
   }
 
-  // Language examples learned from Mujtaba
-  if (languageExamples) {
-    prompt += `${languageExamples}\n\n`;
-  }
-
   // Time context
   prompt += `Current time: ${timeContext}.\n\n`;
-
-  // Conversation context (let AI detect naturally)
-  prompt += `${conversationContext}\n\n`;
 
   // Conversation history
   if (history.length > 0) {
@@ -422,8 +297,51 @@ async function callLlmGateway(systemPrompt: string, userMessage: string): Promis
   );
 }
 
+async function callSarvam(systemPrompt: string, userMessage: string): Promise<string> {
+  const keys = config.getSarvamKeys();
+  if (keys.length === 0) throw new Error('No Sarvam keys');
+
+  for (const key of keys) {
+    try {
+      const res = await retryWithBackoff(async () => {
+        const response = await fetch('https://api.sarvam.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'api-subscription-key': key,
+          },
+          body: JSON.stringify({
+            model: 'sarvam-m',
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userMessage },
+            ],
+            temperature: 0.8,
+            max_tokens: 300,
+          }),
+        });
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(`Sarvam ${response.status}: ${body}`);
+        }
+        return response;
+      });
+
+      const data = await res.json();
+      if (!data.choices || data.choices.length === 0 || !data.choices[0].message || !data.choices[0].message.content) {
+        throw new Error('Empty response from Sarvam');
+      }
+      return data.choices[0].message.content;
+    } catch (err: any) {
+      if (is429Error(err) && keys.length > 1) continue;
+      throw err;
+    }
+  }
+  throw new Error('All Sarvam keys exhausted');
+}
+
 // ============================================================
-// MEDIA PROCESSING — Images (Gemini Vision, free tier) & Voice (Google STT)
+// MEDIA PROCESSING — Images (Gemini Vision) & Voice (Sarvam STT)
 // ============================================================
 
 export async function describeImage(base64Data: string, mimeType: string): Promise<string> {
@@ -455,7 +373,51 @@ export async function describeImage(base64Data: string, mimeType: string): Promi
   return 'a photo';
 }
 
+async function transcribeAudioSarvam(base64Data: string): Promise<string> {
+  const keys = config.getSarvamKeys();
+  if (keys.length === 0) return '';
+
+  const key = keys[0];
+  try {
+    const buffer = Buffer.from(base64Data, 'base64');
+    const formData = new FormData();
+    const blob = new Blob([buffer], { type: 'audio/ogg' });
+    formData.append('file', blob, 'audio.ogg');
+    formData.append('model', 'saarika:v2.5');
+    formData.append('language_code', 'bn-IN');
+
+    const res = await fetch('https://api.sarvam.ai/speech-to-text', {
+      method: 'POST',
+      headers: { 'api-subscription-key': key },
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error('Sarvam STT error:', errText);
+      return '';
+    }
+
+    const data = await res.json();
+    return data.transcript || '';
+  } catch (err) {
+    console.error('Sarvam STT error:', err);
+    return '';
+  }
+}
+
 export async function transcribeAudio(base64Data: string): Promise<string> {
+  // Try Sarvam STT first (Indian language optimized, bn-IN support, no billing required)
+  if (config.getSarvamKeys().length > 0) {
+    const sarvamResult = await transcribeAudioSarvam(base64Data);
+    if (sarvamResult) {
+      console.log('🎤 Sarvam STT:', sarvamResult.slice(0, 80));
+      return sarvamResult;
+    }
+    console.log('⚠️ Sarvam STT failed, trying Google Cloud...');
+  }
+
+  // Fallback to Google Cloud STT
   const apiKey = config.googleCloudApiKey;
   if (!apiKey) return 'a voice message';
 
@@ -500,6 +462,7 @@ interface Provider {
 
 const providers: Provider[] = [
   { name: 'gemini', call: callGemini },
+  { name: 'sarvam', call: callSarvam },
   { name: 'mistral', call: callMistral },
   { name: 'groq', call: callGroq },
   { name: 'openrouter', call: callOpenRouter },
@@ -510,6 +473,7 @@ const providers: Provider[] = [
 function isProviderAvailable(name: string): boolean {
   switch (name) {
     case 'gemini': return config.getGeminiKeys().length > 0;
+    case 'sarvam': return config.getSarvamKeys().length > 0;
     case 'mistral': return config.getMistralKeys().length > 0;
     case 'groq': return config.getGroqKeys().length > 0;
     case 'openrouter': return config.getOpenRouterKeys().length > 0;
@@ -577,14 +541,12 @@ const EXHAUSTED_MESSAGE = 'Ami akhon ektu busy achi, ektu pore kotha bolte paren
 // ============================================================
 // LLM Routing — Simple messages → Groq first, Complex → Gemini first
 // Only for TRUE simple messages (greetings, bye, yes/no, single word)
-// NOT for short messages in ongoing conversations
 
 function isSimpleMessage(userMessage: string): boolean {
   const lower = userMessage.trim().toLowerCase();
   const words = lower.split(/\s+/).filter(w => w.length > 0);
   if (words.length === 0) return false;
 
-  // Ultra-short: single word or very short
   if (words.length === 1) {
     const singlePatterns = [/^(hi|hello|hey|hlo|hii|hlw|helo|by|bye|byee|gn|goodnight|ok|okay|acha|haan|han|ha|nahi|nhi|na|ni|hmm|mm|hm|thanks|thank|thnx|lol|haha|hehe|oh|oy|aare|are|arey)$/];
     for (const p of singlePatterns) {
@@ -602,7 +564,6 @@ function isSimpleMessage(userMessage: string): boolean {
     return false;
   }
 
-  // 3 words max and only if it's clearly a greeting
   if (words.length === 3) {
     const threeWord = words.join(' ');
     if (/^(kamon asos|kita kbr|kemon aso|kaise ho|kya kar|kya hua|kya baat)$/i.test(threeWord)) return true;
@@ -625,8 +586,8 @@ export interface GenerateReplyResult {
   metadata: ReplyMetadata;
   needsClarification: boolean;
   clarificationText: string;
-  scriptTriggered?: string; // script instruction that was injected
-  hasInformPromise?: boolean; // reply contains "acha bolbo" / "bol dunga" type promise
+  scriptTriggered?: string;
+  hasInformPromise?: boolean;
 }
 
 function makeResult(text: string, metadata?: Partial<ReplyMetadata>, clarification?: { needsClarification: boolean; text: string }, extras?: { scriptTriggered?: string; hasInformPromise?: boolean }): GenerateReplyResult {
@@ -651,87 +612,63 @@ export async function generateReply(
 ): Promise<GenerateReplyResult> {
   const id = senderId || 'unknown';
 
-  // Prune old entries to prevent memory leaks
   pruneExhaustedSent();
 
-  // Check if ALL providers are on cooldown
   const availableProviders = providers.filter(p => isProviderAvailable(p.name) && !isProviderOnCooldown(p.name));
 
   // LLM Routing: Simple message → Groq gets priority (saves Gemini keys)
-  // Complex message → Gemini stays first
+  // Sarvam-m is free so it's also efficient for simple messages
   if (isSimpleMessage(senderMessage)) {
     availableProviders.sort((a, b) => {
       if (a.name === 'groq') return -1;
       if (b.name === 'groq') return 1;
+      if (a.name === 'sarvam') return -1;
+      if (b.name === 'sarvam') return 1;
       return 0;
     });
-    if (availableProviders.length > 0 && availableProviders[0].name === 'groq') {
-      console.log('🔀 Simple message — Groq first');
-    }
   }
 
   if (availableProviders.length === 0) {
-    // Already sent exhausted message — try clarification instead of repeating
     if (exhaustedSent[id]) {
       console.log(`⏭️ Skipping reply to ${id} — already sent exhausted message, trying clarification`);
       return makeResult('', {}, { needsClarification: true, text: 'bhai abhi sab AI busy hai, thoda wait karo ya phir se bolo' });
     }
 
-    // First time all providers down — don't send const busy msg, ask for clarification
     console.log(`⚠️ ALL providers down — asking ${id} to rephrase`);
     exhaustedSent[id] = true;
     return makeResult('', {}, { needsClarification: true, text: 'Ami akhon ektu busy achi, ektu pore kotha bolte paren. 🥲' });
   }
 
-  // Reset exhausted flag when providers available
   exhaustedSent[id] = false;
 
-  // Load personality, context, contacts, language examples
-  const personality = loadPersonality();
+  // Load instructions from single consolidated file
+  const instructions = loadMahirInstructions();
   const context = loadContext();
   const contactsData = loadContacts();
   const contactInfo = contactsData.contacts[id] ? JSON.stringify(contactsData.contacts[id], null, 2) : '';
-  const languageExamples = loadLanguageExamples();
-  const aiGuide = loadAiGuide();
-  const styleProfile = loadStyleProfile();
 
-  // Analyze conversation context naturally (no hardcoded phrases)
-  const conversationContext = getConversationContext(senderMessage, conversationHistory);
-
-  // Check if this is an unknown sender — add name-asking instruction
-  const isNewSender = !contactInfo || contactInfo.length < 20;
-  const nameAskInstruction = isNewSender && conversationHistory.length <= 2
-    ? '\n\n⚠️ NAME DETECTION: This person seems new (you have no saved info about them). If the conversation feels natural and you haven\'t asked yet, casually ask their name sometime soon. Don\'t be robotic — weave it into the conversation naturally. Like "acha btw tumhara naam kya hai?" or at the end of a friendly exchange.'
-    : '';
-
-  // Scripted reply injection
+  // Scripted reply injection (special override feature)
   const scriptInstruction = loadScriptedReply(id);
   const scriptInjection = scriptInstruction
     ? `\n\n📋 SCRIPTED REPLY INSTRUCTION (CRITICAL — FOLLOW THIS WHEN REPLYING): ${scriptInstruction}\nAfter replying naturally (not copy-paste), incorporate Mujtaba's instruction naturally into your response. THEN report back to Mujtaba via Telegram about what you said.`
     : '';
 
-  // Relationship-based behavior
-  const contactData = contactsData.contacts[id];
-  const relationshipBehavior = contactData?.relationship
-    ? `\n\n👤 RELATIONSHIP CONTEXT: This person (${senderName || 'unknown'}) is your ${contactData.relationship}. Treat them accordingly with the appropriate respect and tone.`
-    : '';
-
-  // Build system prompt
+  // Build system prompt — instructions + dynamic data only
   const timeContext = getTimeContext();
-  const systemPrompt = buildSystemPrompt(
-    personality,
+  let systemPrompt = buildSystemPrompt(
+    instructions,
     context,
     contactInfo,
-    languageExamples,
     timeContext,
-    conversationContext + nameAskInstruction + scriptInjection + relationshipBehavior,
     conversationHistory,
     senderName,
-    aiGuide,
-    styleProfile,
   );
 
-  // Try each available provider
+  // Append scripted reply injection if active
+  if (scriptInjection) {
+    systemPrompt += scriptInjection;
+  }
+
   for (const provider of availableProviders) {
     try {
       console.log(`🚀 Trying ${provider.name}...`);
@@ -739,12 +676,10 @@ export async function generateReply(
       let cleaned = cleanReply(reply);
 
       if (cleaned.length > 0) {
-        // Run response guard checks
         const guardResult = runResponseGuard(cleaned, senderMessage, id, conversationHistory);
 
         if (!guardResult.passed) {
           console.log(`🛡️ Guard blocked reply (${guardResult.reason}): ${guardResult.suggestion}`);
-          // Try one more time with guard warning appended to prompt
           const warningPrompt = systemPrompt + `\n\n⚠️ GUARD WARNING: Your previous reply had an issue: ${guardResult.reason}. ${guardResult.suggestion}. Fix this and generate a better reply.`;
           reply = await provider.call(warningPrompt, senderMessage);
           cleaned = cleanReply(reply);
@@ -752,13 +687,8 @@ export async function generateReply(
         }
 
         if (cleaned.length > 0) {
-          // Track reply
           trackReply(id, cleaned);
-
-          // Record outgoing for duplicate detection
           recordOutgoing(id, cleaned);
-
-          // Save contact info (auto-learn from conversation)
           learnFromConversation(id, senderName, senderMessage, cleaned, conversationHistory);
 
           console.log(`✅ ${provider.name}: ${cleaned.slice(0, 60)}...`);
@@ -771,8 +701,6 @@ export async function generateReply(
         console.log(`🔑 ${provider.name} 429 — next provider`);
         setProviderCooldown(provider.name);
       } else if (isRetryableError(err)) {
-        // Retryable errors (503, 500) are already retried inside the provider functions
-        // If we get here, retries also failed — move to next provider
         console.log(`❌ ${provider.name} retryable error after retries: ${err.message}`);
       } else {
         console.log(`❌ ${provider.name} error: ${err.message}`);
@@ -780,7 +708,6 @@ export async function generateReply(
     }
   }
 
-  // All providers failed in this round — use clarification mode instead of const message
   console.log(`🤔 All providers failed for ${id} — using clarification mode`);
   return makeResult('', {}, { needsClarification: true, text: 'bhai me samja nhi, ek baar phir se bolna?' });
 }
@@ -798,15 +725,12 @@ function learnFromConversation(
 ) {
   const existing = loadContacts().contacts[senderId] || {};
 
-  // Save sender name if we don't have it
   if (senderName && !existing.name) {
     existing.name = senderName;
   }
 
-  // Track conversation count
   existing.conversation_count = (existing.conversation_count || 0) + 1;
 
-  // Save last topic (from user message, extract key words)
   const lower = userMessage.toLowerCase();
   if (lower.includes('school') || lower.includes('class') || lower.includes('college')) {
     existing.last_topic = 'education';
@@ -818,7 +742,6 @@ function learnFromConversation(
     existing.last_topic = 'call_request';
   }
 
-  // Save a summary of last interaction
   existing.last_message_summary = userMessage.slice(0, 100);
   existing.last_reply_summary = aiReply.slice(0, 100);
 
@@ -849,10 +772,8 @@ function isImportantMessage(text: string): boolean {
 }
 
 function trackReply(senderId: string, reply: string) {
-  // Cap tracked senders to prevent memory leaks
   const keys = Object.keys(recentReplies);
   if (keys.length >= MAX_TRACKED_SENDERS && !recentReplies[senderId]) {
-    // Remove oldest entry (first key)
     delete recentReplies[keys[0]];
   }
 
@@ -882,4 +803,4 @@ export function isAnyProviderAvailable(): boolean {
   return providers.some(p => isProviderAvailable(p.name) && !isProviderOnCooldown(p.name));
 }
 
-export { loadPersonality, loadContext, saveContact, markScriptReported };
+export { loadContext, saveContact, markScriptReported };
