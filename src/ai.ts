@@ -426,8 +426,75 @@ async function callLlmGateway(systemPrompt: string, userMessage: string): Promis
 }
 
 // ============================================================
-// PROVIDER REGISTRY
+// MEDIA PROCESSING — Images (Gemini Vision, free tier) & Voice (Google STT)
 // ============================================================
+
+export async function describeImage(base64Data: string, mimeType: string): Promise<string> {
+  const keys = config.getGeminiKeys();
+  if (keys.length === 0) return 'a photo';
+
+  for (const key of keys) {
+    try {
+      const ai = new GoogleGenAI({ apiKey: key });
+      const response = await retryWithBackoff(async () => {
+        return await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: [{
+            role: 'user',
+            parts: [
+              { text: 'Describe this image in 1 short sentence in simple Hinglish. Focus on what is visible. If there is a person, describe what they are doing. Keep it under 15 words.' },
+              { inlineData: { mimeType, data: base64Data } },
+            ],
+          }],
+          config: { temperature: 0.3, maxOutputTokens: 50 },
+        });
+      });
+      return response.text?.trim() || 'a photo';
+    } catch (err: any) {
+      if (is429Error(err) && keys.length > 1) continue;
+      return 'a photo';
+    }
+  }
+  return 'a photo';
+}
+
+export async function transcribeAudio(base64Data: string): Promise<string> {
+  const apiKey = config.googleCloudApiKey;
+  if (!apiKey) return 'a voice message';
+
+  try {
+    const res = await fetch(`https://speech.googleapis.com/v1/speech:recognize?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        config: {
+          encoding: 'OGG_OPUS',
+          sampleRateHertz: 48000,
+          languageCode: 'bn-IN',
+          alternativeLanguageCodes: ['en-IN', 'hi-IN', 'en-US'],
+          model: 'latest_short',
+          enableAutomaticPunctuation: true,
+        },
+        audio: { content: base64Data },
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error('Google STT error:', errText);
+      return 'a voice message';
+    }
+
+    const data = await res.json();
+    if (data.results && data.results.length > 0) {
+      return data.results.map((r: any) => r.alternatives?.[0]?.transcript || '').filter(Boolean).join(' ');
+    }
+    return 'a voice message';
+  } catch (err) {
+    console.error('Google STT error:', err);
+    return 'a voice message';
+  }
+}
 
 interface Provider {
   name: string;

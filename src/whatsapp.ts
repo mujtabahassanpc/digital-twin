@@ -4,6 +4,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   WASocket,
   PresenceData,
+  downloadContentFromMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { EventEmitter } from 'events';
@@ -13,6 +14,8 @@ import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import NodeCache from 'node-cache';
 import fs from 'fs';
+import { config } from './config.js';
+import { describeImage, transcribeAudio } from './ai.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const authDir = path.join(__dirname, '..', 'auth_info_baileys');
@@ -30,6 +33,14 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT_DELAY = 60000;
 
 export const whatsappEmitter = new EventEmitter();
+
+async function streamToBuffer(stream: any): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
 
 export async function startWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
@@ -92,15 +103,44 @@ export async function startWhatsApp() {
     // Extract text from various message types
     let text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
 
-    // Handle image captions
+    // Handle image captions — with Vision processing if enabled
     if (msg.message?.imageMessage) {
       const caption = msg.message.imageMessage.caption;
-      text = caption ? `[Photo] ${caption}` : '[Photo]';
+      if (config.mediaProcessing) {
+        try {
+          const stream = await downloadContentFromMessage(msg.message.imageMessage, 'image');
+          const buffer = await streamToBuffer(stream);
+          const base64 = buffer.toString('base64');
+          const mimeType = msg.message.imageMessage.mimetype || 'image/jpeg';
+          const description = await describeImage(base64, mimeType);
+          text = caption ? `${caption} [Sent a photo: ${description}]` : `[Sent a photo: ${description}]`;
+          console.log(`🖼️ Image described: ${description}`);
+        } catch (e) {
+          text = caption ? `[Photo] ${caption}` : '[Photo]';
+          console.error('Image processing error:', e);
+        }
+      } else {
+        text = caption ? `[Photo] ${caption}` : '[Photo]';
+      }
     }
 
-    // Handle voice notes
+    // Handle voice notes — with STT if enabled
     if (msg.message?.audioMessage) {
-      text = '[Voice message]';
+      if (config.mediaProcessing) {
+        try {
+          const stream = await downloadContentFromMessage(msg.message.audioMessage, 'audio');
+          const buffer = await streamToBuffer(stream);
+          const base64 = buffer.toString('base64');
+          const transcript = await transcribeAudio(base64);
+          text = `[Voice: ${transcript}]`;
+          console.log(`🎤 Voice transcribed: ${transcript.slice(0, 80)}`);
+        } catch (e) {
+          text = '[Voice message]';
+          console.error('Voice processing error:', e);
+        }
+      } else {
+        text = '[Voice message]';
+      }
     }
 
     // Handle video

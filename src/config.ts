@@ -30,6 +30,12 @@ export const config = {
   // LLM Gateway
   llmgtwyApiKeys: optionalEnv('LLMGTWY_API_KEYS', ''),
 
+  // Google Cloud (for Speech-to-Text)
+  googleCloudApiKey: optionalEnv('GOOGLE_CLOUD_API_KEY', ''),
+
+  // Media Processing (images via Gemini Vision, voice via Google STT)
+  mediaProcessing: process.env.MEDIA_PROCESSING === 'true',
+
   // Neon Database
   databaseUrl: optionalEnv('DATABASE_URL', ''),
 
