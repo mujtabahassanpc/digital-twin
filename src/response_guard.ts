@@ -56,6 +56,7 @@ export function checkLength(reply: string, userMessage: string): GuardResult {
   const replyLen = reply.trim().length;
 
   // Very short user message (end-of-conversation signals)
+  // Only block when reply is excessively long (80+ chars for a 1-2 word msg)
   if (userLen <= 5 && replyLen > 80) {
     return {
       passed: false,
@@ -64,8 +65,9 @@ export function checkLength(reply: string, userMessage: string): GuardResult {
     };
   }
 
-  // User message is short, reply is 4x longer
-  if (userLen < 20 && replyLen > userLen * 4) {
+  // User message is short, reply is disproportionately long
+  // Use generous multiplier (8x) to avoid blocking natural responses to short questions
+  if (userLen < 10 && replyLen > userLen * 8 && replyLen > 40) {
     return {
       passed: false,
       reason: 'disproportionate_length',

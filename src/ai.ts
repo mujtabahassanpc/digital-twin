@@ -462,7 +462,6 @@ interface Provider {
 
 const providers: Provider[] = [
   { name: 'gemini', call: callGemini },
-  { name: 'sarvam', call: callSarvam },
   { name: 'mistral', call: callMistral },
   { name: 'groq', call: callGroq },
   { name: 'openrouter', call: callOpenRouter },
