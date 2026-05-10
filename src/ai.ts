@@ -11,6 +11,7 @@ const instructionsPath = path.join(dataDir, 'mahir_instructions.md');
 const contextPath = path.join(dataDir, 'context.md');
 const contactsPath = path.join(dataDir, 'contacts.json');
 const scriptedRepliesPath = path.join(dataDir, 'scripted_replies.json');
+const languageExamplesPath = path.join(dataDir, 'language_examples.json');
 
 // Per-sender reply tracking (bounded to prevent memory leaks)
 const recentReplies: Record<string, string[]> = {};
@@ -56,6 +57,24 @@ function loadMahirInstructions(): string {
 
 function loadContext(): string {
   return loadFile(contextPath);
+}
+
+function loadLanguageExamples(): string {
+  try {
+    const raw = fs.readFileSync(languageExamplesPath, 'utf-8');
+    const data = JSON.parse(raw);
+    const examples: any[] = data.examples || [];
+    if (examples.length === 0) return '';
+    let text = '## Language Examples (learned from Mujtaba)\n';
+    const recent = examples.slice(-30);
+    for (const ex of recent) {
+      text += `- Message: "${ex.message}" — Why: ${ex.reason}\n`;
+    }
+    text += '\nThese are examples of how to respond. Understand the pattern, don\'t copy them word-for-word.\n';
+    return text;
+  } catch {
+    return '';
+  }
 }
 
 function loadContacts(): Record<string, any> {
@@ -130,6 +149,7 @@ function buildSystemPrompt(
   instructions: string,
   context: string,
   contactInfo: string,
+  languageExamples: string,
   timeContext: string,
   history: any[],
   senderName?: string,
@@ -144,6 +164,11 @@ function buildSystemPrompt(
   // Contact memory (what Mahir knows about this person)
   if (contactInfo) {
     prompt += `WHAT YOU KNOW ABOUT THIS PERSON:\n${contactInfo}\n\n`;
+  }
+
+  // Language examples taught via /teach
+  if (languageExamples) {
+    prompt += `${languageExamples}\n\n`;
   }
 
   // Time context
@@ -643,6 +668,7 @@ export async function generateReply(
   // Load instructions from single consolidated file
   const instructions = loadMahirInstructions();
   const context = loadContext();
+  const languageExamples = loadLanguageExamples();
   const contactsData = loadContacts();
   const contactInfo = contactsData.contacts[id] ? JSON.stringify(contactsData.contacts[id], null, 2) : '';
 
@@ -658,6 +684,7 @@ export async function generateReply(
     instructions,
     context,
     contactInfo,
+    languageExamples,
     timeContext,
     conversationHistory,
     senderName,
@@ -800,6 +827,45 @@ export function getProviderStatuses(): ProviderStatus[] {
 
 export function isAnyProviderAvailable(): boolean {
   return providers.some(p => isProviderAvailable(p.name) && !isProviderOnCooldown(p.name));
+}
+
+export async function generateSpeech(text: string): Promise<Buffer | null> {
+  const keys = config.getSarvamKeys();
+  if (keys.length === 0) return null;
+
+  const key = keys[0];
+  try {
+    const res = await fetch('https://api.sarvam.ai/text-to-speech', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-subscription-key': key,
+      },
+      body: JSON.stringify({
+        text,
+        target_language_code: 'bn-IN',
+        speaker: 'shubh',
+        model: 'bulbul:v3',
+        pace: 1.0,
+        speech_sample_rate: 24000,
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error('Sarvam TTS error:', errText);
+      return null;
+    }
+
+    const data = await res.json();
+    if (data.audios && data.audios.length > 0) {
+      return Buffer.from(data.audios[0], 'base64');
+    }
+    return null;
+  } catch (err) {
+    console.error('Sarvam TTS error:', err);
+    return null;
+  }
 }
 
 export { loadContext, saveContact, markScriptReported };

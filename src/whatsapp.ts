@@ -213,6 +213,18 @@ export async function sendWhatsAppMessage(to: string, text: string) {
   }
 }
 
+export async function sendVoiceMessage(to: string, audioBuffer: Buffer): Promise<void> {
+  if (!sock) throw new Error('WhatsApp not started');
+  try {
+    const jid = to.includes('@') ? to : toJid(to);
+    await sock!.sendMessage(jid, { audio: audioBuffer, mimetype: 'audio/ogg', ptt: true });
+    console.log(`🎤 Voice message sent to ${jid}`);
+  } catch (err: any) {
+    console.error('Voice message error:', err);
+    throw err;
+  }
+}
+
 export function getQRCode() {
   return currentQR;
 }

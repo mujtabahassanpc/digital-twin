@@ -7,7 +7,7 @@ import { config } from './config.js';
 import { initDatabase, getPool, closePool } from './db.js';
 import { generateReply, getProviderStatuses, isAnyProviderAvailable, getDbCreditsUsed, resetDbCredits } from './ai.js';
 import { saveMessage, getConversationHistory } from './db.js';
-import { startWhatsApp, sendWhatsAppMessage, showTyping, getQRCode, isConnected, whatsappEmitter } from './whatsapp.js';
+import { startWhatsApp, sendWhatsAppMessage, showTyping, sendVoiceMessage, getQRCode, isConnected, whatsappEmitter } from './whatsapp.js';
 import { sendInstantAlert, sendImportantConversationAlert, handleTelegramCommand } from './telegram.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -32,6 +32,13 @@ const importantConversationTriggers = [
   'medical', 'hospital', 'accident', 'death', 'marriage',
   'job', 'offer', 'result', 'exam', 'admission',
 ];
+
+// Voice keywords — user asks Mahir to send voice message
+const voiceKeywords = ['voice', 'bol ke', 'sunna', 'awaaz', 'awaz', 'bol ke bhejo', 'voice message', 'apni awaaz', 'apni awaz', 'bol ke suna', 'sunao', 'bolo na', 'voice me', 'bol ke dikha', 'apni voice', 'voice send'];
+
+// Per-chat voice message count (resets on restart)
+const voiceCountPerChat: Record<string, number> = {};
+const MAX_VOICE_PER_CHAT = 5;
 
 // Message batching — wait 3 sec for more messages from same sender
 const messageBuffers: Record<string, { messages: { text: string; timestamp: number }[]; timer: ReturnType<typeof setTimeout> }> = {};
@@ -170,6 +177,35 @@ function processBatchedMessage(
       if (result.hasInformPromise) {
         const { sendInformAlert } = await import('./telegram.js');
         await sendInformAlert(senderName, senderId, combinedText, result.text).catch(() => {});
+      }
+
+      // --- Voice Reply — user asked Mahir to send voice ---
+      const userWantsVoice = voiceKeywords.some(kw => lower.includes(kw));
+      if (userWantsVoice && config.getSarvamKeys().length > 0) {
+        const currentCount = voiceCountPerChat[senderId] || 0;
+        if (currentCount < MAX_VOICE_PER_CHAT) {
+          console.log(`🎤 ${senderName} asked for voice (${currentCount + 1}/${MAX_VOICE_PER_CHAT})`);
+          const { generateSpeech } = await import('./ai.js');
+          const audioBuffer = await generateSpeech(result.text);
+          if (audioBuffer) {
+            await sendVoiceMessage(senderId, audioBuffer);
+            voiceCountPerChat[senderId] = currentCount + 1;
+            // Send second voice if under limit
+            if (currentCount + 1 < MAX_VOICE_PER_CHAT && result.text.length > 60) {
+              const secondText = result.text.length > 120
+                ? result.text.split(/[.!?\n]/).filter(Boolean).slice(1, 2).join('. ') || 'thik hai'
+                : 'acha thik hai';
+              const secondAudio = await generateSpeech(secondText);
+              if (secondAudio) {
+                await new Promise(r => setTimeout(r, 1500));
+                await sendVoiceMessage(senderId, secondAudio);
+                voiceCountPerChat[senderId] = currentCount + 2;
+              }
+            }
+          }
+        } else {
+          console.log(`⏭️ Voice limit reached for ${senderName} (${MAX_VOICE_PER_CHAT})`);
+        }
       }
     } catch (error) {
       console.error('Error processing message:', error);
