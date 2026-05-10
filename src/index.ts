@@ -5,7 +5,7 @@ import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { initDatabase, getPool, closePool } from './db.js';
-import { generateReply, getProviderStatuses, isAnyProviderAvailable, getDbCreditsUsed, incrementDbCredits, resetDbCredits } from './ai.js';
+import { generateReply, getProviderStatuses, isAnyProviderAvailable, getDbCreditsUsed, incrementDbCredits, resetDbCredits, getObservedContext } from './ai.js';
 import { saveMessage, getConversationHistory } from './db.js';
 import { startWhatsApp, sendWhatsAppMessage, showTyping, sendVoiceMessage, getQRCode, isConnected, whatsappEmitter } from './whatsapp.js';
 import { sendInstantAlert, sendImportantConversationAlert, handleTelegramCommand } from './telegram.js';
@@ -44,36 +44,53 @@ const MAX_VOICE_PER_CHAT = 5;
 const messageBuffers: Record<string, { messages: { text: string; timestamp: number }[]; timer: ReturnType<typeof setTimeout> }> = {};
 const BATCH_WINDOW_MS = 3000;
 
-// Observe Mode — Mujtaba talks, Mahir watches & learns
+// Observe Mode — Mujtaba talks, Mahir watches, learns & summarizes
 let observeMode = false;
 let observePhone: string | null = null;
 let observeStartTime: string | null = null;
+let observeTimer: ReturnType<typeof setTimeout> | null = null;
 const observedMessages: { role: 'user' | 'mujtaba'; content: string; timestamp: string }[] = [];
 const observationsPath = path.join(__dirname, '..', 'data', 'observations.json');
 
+function resetObserveTimer() {
+  if (observeTimer) clearTimeout(observeTimer);
+  // Auto-finalize after 5 min of inactivity
+  observeTimer = setTimeout(() => {
+    if (observeMode && observedMessages.length > 0) {
+      console.log(`⏰ Observe auto-finalized — ${observePhone} inactive for 5 min`);
+      finalizeObservation();
+    }
+  }, 5 * 60 * 1000);
+}
+
+function finalizeObservation() {
+  if (observedMessages.length > 0) {
+    saveObservation();
+    generateObservationSummary();
+  }
+  observeMode = false;
+  observePhone = null;
+  observeStartTime = null;
+  observedMessages.length = 0;
+  if (observeTimer) { clearTimeout(observeTimer); observeTimer = null; }
+}
+
 function toggleObserve(phone: string | null): string {
   if (!phone) {
-    // Turn off
-    if (observeMode && observedMessages.length > 0) {
-      saveObservation();
-      extractLearnings();
-    }
-    observeMode = false;
-    observePhone = null;
-    observeStartTime = null;
-    observedMessages.length = 0;
-    return '🔍 Observe mode OFF. Learnings saved.';
+    finalizeObservation();
+    return '🔍 Observe mode OFF. Full summary saved.';
   }
-  // Turn on — if switching from another phone, save previous observation first
+  // Turn on — save previous observation first if switching
   if (observeMode && observedMessages.length > 0) {
     saveObservation();
-    extractLearnings();
+    generateObservationSummary();
   }
   observeMode = true;
   observePhone = phone;
   observeStartTime = new Date().toISOString();
   observedMessages.length = 0;
-  return `🔍 Observe mode ON for ${phone}. Mahir will watch & learn from this conversation.`;
+  resetObserveTimer();
+  return `🔍 Observe mode ON for ${phone}. Mahir will watch, learn & summarize.`;
 }
 
 function saveObservation() {
@@ -86,66 +103,95 @@ function saveObservation() {
     endedAt: new Date().toISOString(),
     messages: [...observedMessages],
   });
-  // Keep last 50 observations max
   if (all.length > 50) all = all.slice(-50);
   fs.writeFileSync(observationsPath, JSON.stringify(all, null, 2));
   console.log(`📝 Observation saved for ${observePhone} (${observedMessages.length} messages)`);
 }
 
-function extractLearnings() {
+function generateObservationSummary() {
   if (observedMessages.length < 2) return;
-  // Analyze: what topics, language, tone did Mujtaba use?
   const mujtabaMsgs = observedMessages.filter(m => m.role === 'mujtaba');
   const userMsgs = observedMessages.filter(m => m.role === 'user');
   if (mujtabaMsgs.length === 0) return;
 
-  // Extract language patterns
+  // Build full conversation narrative
+  const conversationLog = observedMessages.map(m => {
+    const who = m.role === 'mujtaba' ? '👤 Mujtaba' : '💬 User';
+    return `${who}: ${m.content}`;
+  }).join('\n');
+
+  // Extract style analysis
   const avgMujtabaLen = Math.round(mujtabaMsgs.reduce((s, m) => s + m.content.length, 0) / mujtabaMsgs.length);
   const usesQuestions = mujtabaMsgs.some(m => m.content.includes('?'));
-  const commonWords = new Set<string>();
+  const fillerWords = new Set<string>();
   mujtabaMsgs.forEach(m => {
-    m.content.toLowerCase().split(/\s+/).filter(w => ['acha','hmm','oy','haan','naa','thik','bhai','arey','aare','ha'].includes(w)).forEach(w => commonWords.add(w));
+    m.content.toLowerCase().split(/\s+/).filter(w => ['acha','hmm','oy','haan','naa','thik','bhai','arey','aare','ha'].includes(w)).forEach(w => fillerWords.add(w));
   });
 
-  // Find topics from user messages
-  const topicKeywords = ['exam','school','college','job','work','office','family','bhai','maa','baap','paisa','money','health','medical','shadi','marriage'];
+  const topicKeywords = ['exam','school','college','job','work','office','family','bhai','maa','baap','paisa','money','health','medical','shadi','marriage','urgent','problem'];
   const topics = new Set<string>();
   userMsgs.forEach(m => {
     const lower = m.content.toLowerCase();
     topicKeywords.forEach(t => { if (lower.includes(t)) topics.add(t); });
   });
 
-  // Save learnings to contacts
+  // Create the summary text
+  const totalMsgs = observedMessages.length;
+  const userCount = userMsgs.length;
+  const mujtabaCount = mujtabaMsgs.length;
+  const summaryParts: string[] = [];
+
+  summaryParts.push(`📋 OBSERVED CONVERSATION SUMMARY (${totalMsgs} msgs, ${userCount} user + ${mujtabaCount} Mujtaba):`);
+
+  if (topics.size > 0) {
+    summaryParts.push(`Topics discussed: ${[...topics].join(', ')}.`);
+  }
+
+  summaryParts.push(`Mujtaba's style: avg reply ${avgMujtabaLen} chars, ${usesQuestions ? 'asks questions' : 'mostly statements'}. Common fillers: ${[...fillerWords].join(', ') || 'none detected'}.`);
+
+  // Condensed conversation flow (split into segments)
+  const segments: string[] = [];
+  let currentSegment = '';
+  let lastSpeaker = '';
+  for (const m of observedMessages) {
+    const speaker = m.role === 'mujtaba' ? 'M' : 'U';
+    if (speaker !== lastSpeaker && currentSegment) {
+      segments.push(currentSegment.trim());
+      currentSegment = '';
+    }
+    currentSegment += `${speaker}: ${m.content} | `;
+    lastSpeaker = speaker;
+  }
+  if (currentSegment) segments.push(currentSegment.trim());
+
+  summaryParts.push(`Conversation flow (${segments.length} exchanges):`);
+  segments.slice(0, 15).forEach((seg, i) => {
+    summaryParts.push(`  ${i + 1}. ${seg.slice(0, 120)}...`);
+  });
+
+  const fullSummary = summaryParts.join('\n');
+
+  // Save to contacts
   if (!observePhone) return;
   const contactsPath = path.join(__dirname, '..', 'data', 'contacts.json');
   try {
     const data = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
     if (!data.contacts[observePhone]) data.contacts[observePhone] = {};
     const contact = data.contacts[observePhone];
+    contact.observation_summary = fullSummary;
     contact.observed_style = {
       avg_reply_length: avgMujtabaLen,
       uses_questions: usesQuestions,
-      mujtaba_fillers: [...commonWords],
+      mujtaba_fillers: [...fillerWords],
       detected_topics: [...topics],
+      total_messages: totalMsgs,
       last_observed: new Date().toISOString(),
     };
     if (topics.size > 0) contact.last_topic = [...topics][0];
     data.last_updated = new Date().toISOString();
     fs.writeFileSync(contactsPath, JSON.stringify(data, null, 2));
-    console.log(`📚 Learnings extracted for ${observePhone}: ${[...topics].join(', ')}, avg len ${avgMujtabaLen} chars`);
+    console.log(`📚 Observation summary saved for ${observePhone} — ${totalMsgs} msgs, topics: ${[...topics].join(', ')}`);
   } catch { /* silent */ }
-}
-
-function getObservedContext(phone: string): string {
-  if (!observeMode || observePhone !== phone || observedMessages.length === 0) return '';
-  const recent = observedMessages.slice(-6);
-  let ctx = '## Mujtaba is personally handling this conversation (OBSERVED):\n';
-  for (const m of recent) {
-    const speaker = m.role === 'mujtaba' ? '👤 Mujtaba' : '💬 User';
-    ctx += `${speaker}: ${m.content}\n`;
-  }
-  ctx += '\nNote: Mujtaba is talking directly. Mahir should learn from this style.\n';
-  return ctx;
 }
 
 function processBatchedMessage(
@@ -162,6 +208,7 @@ function processBatchedMessage(
       // Observe mode: save incoming message without auto-replying
       if (observeMode && observePhone === senderId) {
         observedMessages.push({ role: 'user', content: combinedText, timestamp: new Date().toISOString() });
+        resetObserveTimer();
         console.log(`🔍 Observe: User (${senderName}) said: "${combinedText.slice(0, 60)}..."`);
         return;
       }
@@ -388,6 +435,7 @@ function splitIntoMessages(text: string): string[] {
 whatsappEmitter.on('own-message', (data: { senderId: string; text: string }) => {
   if (observeMode && observePhone === data.senderId) {
     observedMessages.push({ role: 'mujtaba', content: data.text, timestamp: new Date().toISOString() });
+    resetObserveTimer();
     console.log(`🔍 Observe: Mujtaba replied to ${data.senderId}: "${data.text.slice(0, 60)}..."`);
   }
 });
@@ -630,7 +678,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   res.status(500).json({ error: 'Internal server error' });
 });
 
-export { toggleObserve, getObservedContext };
+export { toggleObserve };
 export default app;
 
 // Start server if running directly

@@ -793,8 +793,13 @@ export async function generateReply(
 
   // Build system prompt — instructions + dynamic data only
   const timeContext = getTimeContext();
+  // Observation summary (full conversation summary from observe mode)
+  const observationSummary = getObservedContext(id);
   // Append contact summary to contactInfo
-  const enhancedContactInfo = contactInfo + (contactSummary ? `\n\n${contactSummary}` : '');
+  let enhancedContactInfo = contactInfo + (contactSummary ? `\n\n${contactSummary}` : '');
+  if (observationSummary) {
+    enhancedContactInfo += `\n\nOBSERVED CONVERSATION SUMMARY (Mujtaba was talking to this person earlier — learn from his style):\n${observationSummary}`;
+  }
 
   let systemPrompt = buildSystemPrompt(
     instructions,
@@ -1071,7 +1076,7 @@ export function markScheduleSent(id: string, error?: string) {
 }
 
 // ============================================================
-// OBSERVE MODE — Shared state for Mujtaba's conversation observation
+// OBSERVE MODE — Shared state + observation summary access
 // ============================================================
 
 let _observeMode = false;
@@ -1094,6 +1099,18 @@ export function setObserveMode(on: boolean, phone?: string): string {
   _observeMode = true;
   _observePhone = phone || null;
   return `🔍 Observe mode ON for ${_observePhone}. Mahir will watch & learn.`;
+}
+
+export function getObservedContext(phone: string): string {
+  const contactsPath = path.join(dataDir, 'contacts.json');
+  try {
+    const data = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
+    const contact = data.contacts[phone];
+    if (contact?.observation_summary) {
+      return contact.observation_summary;
+    }
+  } catch { /* silent */ }
+  return '';
 }
 
 export { loadContext, saveContact, markScriptReported };
