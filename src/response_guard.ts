@@ -117,6 +117,56 @@ export function checkFacts(reply: string, history: ConversationEntry[]): GuardRe
 }
 
 /**
+ * Check if "bhai" is used more than 2 times in a single reply
+ */
+export function checkBhaiCount(reply: string): GuardResult {
+  const bhaiMatches = reply.match(/\bbhai\b/gi);
+  if (bhaiMatches && bhaiMatches.length > 2) {
+    return {
+      passed: false,
+      reason: 'too_many_bhai',
+      suggestion: `Reply uses "bhai" ${bhaiMatches.length} times. Max 2. Replace some or rephrase.`,
+    };
+  }
+  return { passed: true, reason: '', suggestion: '' };
+}
+
+/**
+ * Check sentence structure similarity with previous 3 replies
+ */
+export function checkStructure(reply: string, senderId: string): GuardResult {
+  const history = outgoingHistory[senderId] || [];
+  if (history.length === 0) return { passed: true, reason: '', suggestion: '' };
+
+  const sentences = reply.split(/[.!?\n]+/).filter(s => s.trim().length > 3);
+  if (sentences.length === 0) return { passed: true, reason: '', suggestion: '' };
+
+  const firstWords = sentences.map(s => s.trim().toLowerCase().split(/\s+/)[0]).filter(Boolean);
+
+  for (const prev of history.slice(-3)) {
+    const prevFirstWords = prev.split(/[.!?\n]+/)
+      .filter(s => s.trim().length > 3)
+      .map(s => s.trim().toLowerCase().split(/\s+/)[0])
+      .filter(Boolean);
+
+    if (firstWords.length > 0 && prevFirstWords.length > 0) {
+      let matchCount = 0;
+      for (const fw of firstWords) {
+        if (prevFirstWords.includes(fw)) matchCount++;
+      }
+      if (matchCount > firstWords.length / 2) {
+        return {
+          passed: false,
+          reason: 'repetitive_structure',
+          suggestion: `Openings (${firstWords.slice(0, 3).join(', ')}) too similar to: "${prev.slice(0, 50)}...". Vary openings.`,
+        };
+      }
+    }
+  }
+  return { passed: true, reason: '', suggestion: '' };
+}
+
+/**
  * Run all guards on a reply before sending
  */
 export function runResponseGuard(
@@ -129,11 +179,19 @@ export function runResponseGuard(
   const dup = checkDuplicate(reply, senderId);
   if (!dup.passed) return dup;
 
-  // Check 2: Length
+  // Check 2: Structure (repetitive openings)
+  const struct = checkStructure(reply, senderId);
+  if (!struct.passed) return struct;
+
+  // Check 3: Bhai count
+  const bhai = checkBhaiCount(reply);
+  if (!bhai.passed) return bhai;
+
+  // Check 4: Length
   const len = checkLength(reply, userMessage);
   if (!len.passed) return len;
 
-  // Check 3: Facts
+  // Check 5: Facts
   const fact = checkFacts(reply, history);
   if (!fact.passed) return fact;
 

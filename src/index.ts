@@ -93,15 +93,35 @@ function processBatchedMessage(
       // Generate AI reply with metadata
       const result = await generateReply(combinedText, history, senderName, senderId);
 
-      // --- End Enforcer: Trim reply when user is giving very short responses ---
+      // --- Enhanced End Enforcer: Detect conversation ending & energy ---
       const recentUserMsgs = history.filter(e => e.role === 'user').slice(-3);
+      const currentMsgShort = combinedText.trim().length <= 3;
       const allShort = recentUserMsgs.length >= 2 && recentUserMsgs.every(e => e.content.trim().length <= 5);
       const noQuestion = !recentUserMsgs.some(e => e.content.includes('?'));
       const replyIsLong = result.text && result.text.split(' ').length > 12;
 
-      if (allShort && noQuestion && replyIsLong) {
+      // Level 1: Single-word ending ("ok", "hmm", "k") → ultra short reply
+      if (currentMsgShort && combinedText.trim().toLowerCase().match(/^(ok|hmm|hm|mm|k|hn|na|acha|thik|oh|haan|haa)$/)) {
+        const acknowledgments = ['thik ache', 'acha', 'mm', 'thik hai'];
+        result.text = acknowledgments[Math.floor(Math.random() * acknowledgments.length)];
+        console.log('✂️ Ultra-short ending detected — single-word acknowledgment');
+      }
+      // Level 2: User consistently giving short replies → trim to 1 sentence
+      else if (allShort && noQuestion && replyIsLong) {
         result.text = result.text.split(' ').slice(0, 12).join(' ').trim() + '.';
         console.log('✂️ Reply trimmed (end enforcer)');
+      }
+
+      // --- Serious mode: Detect urgent/harsh keywords → remove jokes/emojis ---
+      const seriousKeywords = ['death', 'died', 'mar gaya', 'accident', 'hospital', 'operation', 'critical', 'surgery', 'loss', 'passed away', 'innalillahi', 'condolence'];
+      const isSerious = seriousKeywords.some(kw => combinedText.toLowerCase().includes(kw));
+      if (isSerious && result.text) {
+        result.text = result.text
+          .replace(/[😀-🙏🀄-🧀🗨-🛿]/gu, '')
+          .replace(/😂|😅|🤣|😆|😁/g, '')
+          .replace(/lol|haha|hehe/gi, '')
+          .trim();
+        console.log('🕊️ Serious mode — jokes/emojis removed');
       }
 
       // Handle clarification needed — Mahir asks user to rephrase AND tells Mujtaba
@@ -150,11 +170,12 @@ function processBatchedMessage(
 
       for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
-        const delay = i === 0 ? result.metadata.typingDelay : getTypingDelay(msg.length);
+        const delay = getTypingDelay(msg.length);
 
         if (i > 0) {
-          // Small pause between messages (human-like)
-          await new Promise((resolve) => setTimeout(resolve, 800 + Math.random() * 1200));
+          // Realistic pause between messages (human-like: 1-3 sec)
+          const pause = 1000 + Math.random() * 2000;
+          await new Promise((resolve) => setTimeout(resolve, pause));
         }
 
         await showTyping(senderId, delay);
@@ -215,8 +236,14 @@ function processBatchedMessage(
 }
 
 function getTypingDelay(len: number): number {
-  const base = Math.max(600, Math.min(4000, len * 50));
-  return Math.round(base * (0.7 + Math.random() * 0.6));
+  // Realistic typing: short messages fast, long messages with natural pace
+  // ~40 chars/sec with human variation
+  let base: number;
+  if (len <= 10) base = 700 + Math.random() * 500;       // 0.7-1.2s for very short
+  else if (len <= 30) base = 1000 + Math.random() * 800;  // 1-1.8s for short
+  else if (len <= 80) base = 1500 + Math.random() * 1000; // 1.5-2.5s for medium
+  else base = 2200 + Math.random() * 1500;                // 2.2-3.7s for long
+  return Math.round(base);
 }
 
 function splitIntoMessages(text: string): string[] {

@@ -716,6 +716,22 @@ export async function generateReply(
   const contact = contactsData.contacts[id];
   const contactInfo = contact ? JSON.stringify(contact, null, 2) : '';
 
+  // Enhanced contact memory: last topic, mood, relationship summary
+  let contactSummary = '';
+  if (contact) {
+    const parts: string[] = [];
+    if (contact.relationship) {
+      const relNames: Record<string, string> = { mom: 'mother', dad: 'father', bibi: 'wife', wife: 'wife', friend: 'friend', boss: 'boss', bhai: 'brother', brother: 'brother', didi: 'elder sister', sister: 'elder sister', elder: 'elder', stranger: 'stranger', client: 'client', teacher: 'teacher' };
+      parts.push(`This is your ${relNames[contact.relationship] || contact.relationship}`);
+    }
+    if (contact.last_topic) parts.push(`last topic was about ${contact.last_topic}`);
+    if (contact.last_message_summary) parts.push(`last message: "${contact.last_message_summary.slice(0, 80)}"`);
+    if (contact.last_reply_summary) parts.push(`you replied: "${contact.last_reply_summary.slice(0, 80)}"`);
+    if (contact.name) parts.push(`their name is ${contact.name} — use it naturally in conversation`);
+    if (contact.conversation_count) parts.push(`you've talked ${contact.conversation_count} times before`);
+    if (parts.length > 0) contactSummary = `📌 Contact Summary: ${parts.join('. ')}.`;
+  }
+
   // Relationship-based tone instruction
   const rel = contact?.relationship || '';
   const behaviorMap: Record<string, string> = {
@@ -746,16 +762,19 @@ export async function generateReply(
 
   // Build system prompt — instructions + dynamic data only
   const timeContext = getTimeContext();
+  // Append contact summary to contactInfo
+  const enhancedContactInfo = contactInfo + (contactSummary ? `\n\n${contactSummary}` : '');
+
   let systemPrompt = buildSystemPrompt(
     instructions,
     context,
-    contactInfo,
+    enhancedContactInfo,
     languageExamples,
     styleProfile,
     timeContext,
     conversationHistory,
     senderName,
-    relationshipInstruction
+    relationshipInstruction,
   );
 
   // Append scripted reply injection if active
