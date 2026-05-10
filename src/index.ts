@@ -454,6 +454,54 @@ app.post('/api/digest', async (_req, res) => {
   }
 });
 
+// Learning Queue API
+app.get('/api/learning-queue', (_req, res) => {
+  const queuePath = path.join(__dirname, '..', 'data', 'learning_queue.json');
+  try {
+    const raw = fs.readFileSync(queuePath, 'utf-8');
+    const queue = JSON.parse(raw);
+    const pending = queue.filter((item: any) => item.status === 'new').slice(-20);
+    res.json({ total: queue.length, pending: pending.length, items: pending });
+  } catch {
+    res.json({ total: 0, pending: 0, items: [] });
+  }
+});
+
+app.post('/api/learning-queue/approve', async (req, res) => {
+  const { index } = req.body;
+  if (typeof index !== 'number') return res.status(400).json({ error: 'index required' });
+
+  const queuePath = path.join(__dirname, '..', 'data', 'learning_queue.json');
+  const langPath = path.join(__dirname, '..', 'data', 'language_examples.json');
+
+  try {
+    const raw = fs.readFileSync(queuePath, 'utf-8');
+    const queue = JSON.parse(raw);
+    const pending = queue.filter((item: any) => item.status === 'new');
+    if (index < 0 || index >= pending.length) return res.status(404).json({ error: 'Item not found' });
+
+    const item = pending[index];
+    item.status = 'approved';
+
+    // Add to language examples
+    const langRaw = fs.readFileSync(langPath, 'utf-8');
+    const lang = JSON.parse(langRaw);
+    lang.examples.push({
+      message: item.userMessage,
+      reason: `Auto-learned: ${item.senderName} said "${item.userMessage.slice(0, 50)}"`,
+      added_at: new Date().toISOString(),
+    });
+    lang.last_updated = new Date().toISOString();
+
+    fs.writeFileSync(langPath, JSON.stringify(lang, null, 2));
+    fs.writeFileSync(queuePath, JSON.stringify(queue, null, 2));
+
+    res.json({ success: true, message: 'Approved and added to language examples' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Catch-all for SPA
 app.get('*', (_req, res) => {
   res.sendFile(path.join(rootDir, 'public', 'index.html'));

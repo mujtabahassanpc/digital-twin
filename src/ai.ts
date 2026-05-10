@@ -40,6 +40,36 @@ const providerCooldowns: Record<string, number> = {
   llmgtwy: 0
 };
 
+// Provider success/fail tracking
+const providerStats: Record<string, { success: number; fail: number; lastUsed: string }> = {};
+
+function recordProviderSuccess(name: string) {
+  if (!providerStats[name]) providerStats[name] = { success: 0, fail: 0, lastUsed: '' };
+  providerStats[name].success++;
+  providerStats[name].lastUsed = new Date().toISOString();
+}
+
+function recordProviderFail(name: string) {
+  if (!providerStats[name]) providerStats[name] = { success: 0, fail: 0, lastUsed: '' };
+  providerStats[name].fail++;
+  providerStats[name].lastUsed = new Date().toISOString();
+}
+
+// Fallback canned reply pool — used when all LLM providers fail
+const fallbackReplies = [
+  'Ami akhon ektu busy achi, pore kotha bolte paren.',
+  'Acha bhai, me dekhbo pore. Thoda busy hu abhi.',
+  'Bhai ektu kaam me atka hu, pore detail me baat karte hain.',
+  'Ektu busy achi bhai, pore baat kori. Thik ache?',
+  'Bhai abhi reply dena possible na, pore bolbo inshaAllah.',
+];
+let fallbackIdx = 0;
+function getFallbackReply(): string {
+  const reply = fallbackReplies[fallbackIdx];
+  fallbackIdx = (fallbackIdx + 1) % fallbackReplies.length;
+  return reply;
+}
+
 // ============================================================
 // FILE LOADERS
 // ============================================================
@@ -697,13 +727,13 @@ export async function generateReply(
 
   if (availableProviders.length === 0) {
     if (exhaustedSent[id]) {
-      console.log(`⏭️ Skipping reply to ${id} — already sent exhausted message, trying clarification`);
-      return makeResult('', {}, { needsClarification: true, text: 'bhai abhi sab AI busy hai, thoda wait karo ya phir se bolo' });
+      console.log(`⏭️ Skipping reply to ${id} — all providers still down, using fallback`);
+      return makeResult(getFallbackReply());
     }
 
-    console.log(`⚠️ ALL providers down — asking ${id} to rephrase`);
+    console.log(`⚠️ ALL providers down — fallback reply to ${id}`);
     exhaustedSent[id] = true;
-    return makeResult('', {}, { needsClarification: true, text: 'Ami akhon ektu busy achi, ektu pore kotha bolte paren. 🥲' });
+    return makeResult(getFallbackReply());
   }
 
   exhaustedSent[id] = false;
@@ -806,11 +836,13 @@ export async function generateReply(
           learnFromConversation(id, senderName, senderMessage, cleaned, conversationHistory);
 
           console.log(`✅ ${provider.name}: ${cleaned.slice(0, 60)}...`);
+          recordProviderSuccess(provider.name);
           const hasInform = /(acha bolbo|bol dunga|ko bol|inform|tell|bata dunga|puchke bat|pore bol|Mujtaba ko)/i.test(cleaned);
           return makeResult(cleaned, {}, undefined, { scriptTriggered: scriptInstruction, hasInformPromise: hasInform });
         }
       }
     } catch (err: any) {
+      recordProviderFail(provider.name);
       if (is429Error(err)) {
         console.log(`🔑 ${provider.name} 429 — next provider`);
         setProviderCooldown(provider.name);
@@ -822,8 +854,8 @@ export async function generateReply(
     }
   }
 
-  console.log(`🤔 All providers failed for ${id} — using clarification mode`);
-  return makeResult('', {}, { needsClarification: true, text: 'bhai me samja nhi, ek baar phir se bolna?' });
+  console.log(`🤔 All providers failed for ${id} — fallback reply`);
+  return makeResult(getFallbackReply());
 }
 
 // ============================================================
@@ -901,17 +933,27 @@ export interface ProviderStatus {
   available: boolean;
   onCooldown: boolean;
   cooldownRemaining: number;
+  successCount: number;
+  failCount: number;
+  lastUsed: string;
 }
 
-export function getProviderStatuses(): ProviderStatus[] {
-  return providers.map(p => ({
-    name: p.name,
-    available: isProviderAvailable(p.name),
-    onCooldown: isProviderOnCooldown(p.name),
-    cooldownRemaining: isProviderOnCooldown(p.name)
-      ? Math.max(0, Math.round((providerCooldowns[p.name] - Date.now()) / 1000))
-      : 0,
-  }));
+export function getProviderStatuses(): (ProviderStatus & { stats: { success: number; fail: number; lastUsed: string } })[] {
+  return providers.map(p => {
+    const stats = providerStats[p.name] || { success: 0, fail: 0, lastUsed: '' };
+    return {
+      name: p.name,
+      available: isProviderAvailable(p.name),
+      onCooldown: isProviderOnCooldown(p.name),
+      cooldownRemaining: isProviderOnCooldown(p.name)
+        ? Math.max(0, Math.round((providerCooldowns[p.name] - Date.now()) / 1000))
+        : 0,
+      successCount: stats.success,
+      failCount: stats.fail,
+      lastUsed: stats.lastUsed,
+      stats,
+    };
+  });
 }
 
 export function isAnyProviderAvailable(): boolean {
