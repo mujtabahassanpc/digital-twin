@@ -309,6 +309,12 @@ export async function handleTelegramCommand(command: string, args: string): Prom
 <b>🔗 Relationship:</b>
 <b>/relation [phone] [type]</b> — Set relationship (mom/dad/bibi/friend/boss/bhai/didi/elder/stranger)
 
+<b>⏰ Scheduled Messages:</b>
+<b>/schedule [phone] [time] [msg]</b> — Schedule a future message
+   Time: "2026-05-11 11:00" ya "kal 11:00" ya "tomorrow 10:30"
+<b>/slist</b> — View all pending schedules
+<b>/sdel [id]</b> — Delete a pending schedule
+
 <b>💬 Reply:</b>
 <b>/reply [number] [msg]</b> — Send manual WhatsApp reply
 
@@ -717,6 +723,73 @@ export async function handleTelegramCommand(command: string, args: string): Prom
       } catch {
         return sendTelegramMessage('❌ Failed to save relationship');
       }
+    }
+
+    case 'schedule': {
+      // Format: /schedule [phone] [time] [message]
+      // Time examples: "2026-05-11 11:00", "kal 11:00", "tomorrow 11:00", "today 14:30"
+      // If relative (kal/tomorrow/today), interpret as today/tomorrow in IST
+      const parts = args.split(' ');
+      if (parts.length < 3) {
+        return sendTelegramMessage('Usage: <code>/schedule [phone] [time] [message]</code>\n\nExamples:\n<code>/schedule 91987654321 2026-05-11 11:00 Kemon asos?</code>\n<code>/schedule 91987654321 kal 11:00 Kemon asos?</code>\n<code>/schedule 91987654321 tomorrow 10:30 Eid Mubarak bhai</code>\n\nTime: YYYY-MM-DD HH:MM or relative (kal/tomorrow/today) HH:MM');
+      }
+      const phone = parts[0];
+      const timeStr = parts[1] + ' ' + parts[2];
+      const msg = parts.slice(3).join(' ');
+
+      // Parse time
+      let scheduledDate: Date;
+      const lowerTime = timeStr.toLowerCase();
+      const timeMatch = timeStr.match(/(\d{1,2}):(\d{2})/);
+      if (!timeMatch) return sendTelegramMessage('❌ Invalid time format. Use HH:MM (24hr).');
+
+      const hours = parseInt(timeMatch[1]);
+      const minutes = parseInt(timeMatch[2]);
+
+      if (lowerTime.startsWith('kal') || lowerTime.startsWith('tomorrow')) {
+        scheduledDate = new Date();
+        scheduledDate.setDate(scheduledDate.getDate() + 1);
+      } else if (lowerTime.startsWith('today') || lowerTime.startsWith('aaj')) {
+        scheduledDate = new Date();
+      } else if (timeStr.match(/^\d{4}-\d{2}-\d{2}/)) {
+        // Full date provided
+        const datePart = timeStr.split(' ')[0];
+        scheduledDate = new Date(datePart + 'T' + timeMatch[0] + ':00+05:30');
+      } else {
+        scheduledDate = new Date();
+      }
+      scheduledDate.setHours(hours, minutes, 0, 0);
+
+      if (scheduledDate.getTime() <= Date.now()) {
+        return sendTelegramMessage('❌ Time is in the past. Give a future time.');
+      }
+
+      const { createSchedule } = await import('./ai.js') as any;
+      const schedule = createSchedule(phone, phone, msg, scheduledDate.toISOString());
+      return sendTelegramMessage(`✅ Schedule created!\n\n<b>ID:</b> ${schedule.id}\n<b>To:</b> ${phone}\n<b>Time:</b> ${scheduledDate.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n<b>Message:</b> "${msg}"\n\nMahir automatically send karega is time pe. Mujtaba ko Telegram pe alert milega jab send ho jayega.`);
+    }
+
+    case 'slist': {
+      const { getSchedules } = await import('./ai.js') as any;
+      const all = getSchedules();
+      const pending = all.filter((s: any) => s.status === 'pending');
+      if (pending.length === 0) return sendTelegramMessage('📋 No pending scheduled messages.');
+      let text = '📋 <b>Pending Schedules:</b>\n\n';
+      pending.forEach((s: any, i: number) => {
+        const time = new Date(s.scheduledTime).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+        text += `<b>${i + 1}.</b> <code>${s.id}</code>\n   To: ${s.targetPhone}\n   Time: ${time}\n   Msg: "${s.message.slice(0, 60)}"\n\n`;
+      });
+      return sendTelegramMessage(text);
+    }
+
+    case 'sdel': {
+      const id = args.trim();
+      if (!id) return sendTelegramMessage('Usage: <code>/sdel [schedule_id]</code>\n\nUse /slist to see IDs.');
+      const { deleteSchedule } = await import('./ai.js') as any;
+      if (deleteSchedule(id)) {
+        return sendTelegramMessage(`✅ Schedule <code>${id}</code> deleted.`);
+      }
+      return sendTelegramMessage(`❌ Schedule not found: ${id}`);
     }
 
     default:

@@ -13,6 +13,7 @@ const contactsPath = path.join(dataDir, 'contacts.json');
 const scriptedRepliesPath = path.join(dataDir, 'scripted_replies.json');
 const languageExamplesPath = path.join(dataDir, 'language_examples.json');
 const styleProfilePath = path.join(dataDir, 'style_profile.json');
+const scheduledMessagesPath = path.join(dataDir, 'scheduled_messages.json');
 
 // Per-sender reply tracking (bounded to prevent memory leaks)
 const recentReplies: Record<string, string[]> = {};
@@ -953,6 +954,77 @@ export async function generateSpeech(text: string): Promise<Buffer | null> {
   } catch (err) {
     console.error('Sarvam TTS error:', err);
     return null;
+  }
+}
+
+// ============================================================
+// SCHEDULED MESSAGES — Send messages at a future time
+// ============================================================
+
+interface ScheduledMessage {
+  id: string;
+  targetPhone: string;
+  targetName: string;
+  message: string;
+  scheduledTime: string;
+  status: 'pending' | 'sent' | 'failed';
+  createdAt: string;
+  lastError?: string;
+}
+
+function loadSchedules(): ScheduledMessage[] {
+  try {
+    return JSON.parse(fs.readFileSync(scheduledMessagesPath, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function saveSchedules(schedules: ScheduledMessage[]) {
+  fs.writeFileSync(scheduledMessagesPath, JSON.stringify(schedules, null, 2));
+}
+
+export function createSchedule(targetPhone: string, targetName: string, message: string, scheduledTime: string): ScheduledMessage {
+  const schedules = loadSchedules();
+  const schedule: ScheduledMessage = {
+    id: Math.random().toString(36).substring(2, 10),
+    targetPhone,
+    targetName,
+    message,
+    scheduledTime,
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+  };
+  schedules.push(schedule);
+  saveSchedules(schedules);
+  return schedule;
+}
+
+export function getSchedules(): ScheduledMessage[] {
+  return loadSchedules();
+}
+
+export function deleteSchedule(id: string): boolean {
+  const schedules = loadSchedules();
+  const idx = schedules.findIndex(s => s.id === id);
+  if (idx === -1) return false;
+  schedules.splice(idx, 1);
+  saveSchedules(schedules);
+  return true;
+}
+
+export function getDueSchedules(): ScheduledMessage[] {
+  const now = Date.now();
+  return loadSchedules().filter(s => s.status === 'pending' && new Date(s.scheduledTime).getTime() <= now);
+}
+
+export function markScheduleSent(id: string, error?: string) {
+  const schedules = loadSchedules();
+  const s = schedules.find(s => s.id === id);
+  if (s) {
+    s.status = error ? 'failed' : 'sent';
+    s.lastError = error;
+    saveSchedules(schedules);
   }
 }
 

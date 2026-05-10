@@ -479,6 +479,9 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
         setInterval(checkDbSize, 6 * 60 * 60 * 1000);
       }
 
+      // Start schedule checker (every 30 seconds)
+      startScheduleChecker();
+
       const PORT = config.port;
       app.listen(PORT, () => {
         console.log(`\n🤖 Mahir Abher (Mujtaba ka Bhai) running on http://localhost:${PORT}`);
@@ -535,6 +538,32 @@ async function checkDbSize() {
   } catch (err) {
     console.error('DB size check error:', err);
   }
+}
+
+// Scheduled Message Checker
+function startScheduleChecker() {
+  setInterval(async () => {
+    try {
+      const { getDueSchedules, markScheduleSent } = await import('./ai.js') as any;
+      const due = getDueSchedules();
+      for (const s of due) {
+        console.log(`⏰ Sending scheduled message to ${s.targetPhone}: "${s.message.slice(0, 50)}..."`);
+        try {
+          const { sendWhatsAppMessage } = await import('./whatsapp.js') as any;
+          await sendWhatsAppMessage(s.targetPhone, `${s.message}\n\n— Mahir Abher 🤖`);
+          markScheduleSent(s.id);
+          const { sendTelegramMessage } = await import('./telegram.js') as any;
+          await sendTelegramMessage(`⏰ <b>Scheduled Message Sent</b>\n\n<b>To:</b> ${s.targetPhone}\n<b>Time:</b> ${new Date(s.scheduledTime).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n<b>Message:</b> "${s.message.slice(0, 100)}"`).catch(() => {});
+          console.log(`✅ Scheduled message sent to ${s.targetPhone}`);
+        } catch (err: any) {
+          console.error(`❌ Failed to send scheduled message to ${s.targetPhone}:`, err);
+          markScheduleSent(s.id, err.message);
+        }
+      }
+    } catch (err) {
+      // silent — scheduler keeps running
+    }
+  }, 30_000);
 }
 
 // Graceful Shutdown
