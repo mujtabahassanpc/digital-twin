@@ -51,6 +51,8 @@ let observeStartTime: string | null = null;
 let observeTimer: ReturnType<typeof setTimeout> | null = null;
 const observedMessages: { role: 'user' | 'mujtaba'; content: string; timestamp: string }[] = [];
 const observationsPath = path.join(__dirname, '..', 'data', 'observations.json');
+const learnedLangPath = path.join(__dirname, '..', 'data', 'learned_language.json');
+const learnedKnowPath = path.join(__dirname, '..', 'data', 'learned_knowledge.json');
 
 function resetObserveTimer() {
   if (observeTimer) clearTimeout(observeTimer);
@@ -114,60 +116,165 @@ function generateObservationSummary() {
   const userMsgs = observedMessages.filter(m => m.role === 'user');
   if (mujtabaMsgs.length === 0) return;
 
-  // Build full conversation narrative
-  const conversationLog = observedMessages.map(m => {
-    const who = m.role === 'mujtaba' ? '👤 Mujtaba' : '💬 User';
-    return `${who}: ${m.content}`;
-  }).join('\n');
-
-  // Extract style analysis
-  const avgMujtabaLen = Math.round(mujtabaMsgs.reduce((s, m) => s + m.content.length, 0) / mujtabaMsgs.length);
-  const usesQuestions = mujtabaMsgs.some(m => m.content.includes('?'));
-  const fillerWords = new Set<string>();
-  mujtabaMsgs.forEach(m => {
-    m.content.toLowerCase().split(/\s+/).filter(w => ['acha','hmm','oy','haan','naa','thik','bhai','arey','aare','ha'].includes(w)).forEach(w => fillerWords.add(w));
-  });
-
-  const topicKeywords = ['exam','school','college','job','work','office','family','bhai','maa','baap','paisa','money','health','medical','shadi','marriage','urgent','problem'];
-  const topics = new Set<string>();
-  userMsgs.forEach(m => {
-    const lower = m.content.toLowerCase();
-    topicKeywords.forEach(t => { if (lower.includes(t)) topics.add(t); });
-  });
-
-  // Create the summary text
   const totalMsgs = observedMessages.length;
   const userCount = userMsgs.length;
   const mujtabaCount = mujtabaMsgs.length;
-  const summaryParts: string[] = [];
+  const allText = observedMessages.map(m => m.content).join(' ');
+  const allLower = allText.toLowerCase();
 
-  summaryParts.push(`📋 OBSERVED CONVERSATION SUMMARY (${totalMsgs} msgs, ${userCount} user + ${mujtabaCount} Mujtaba):`);
-
-  if (topics.size > 0) {
-    summaryParts.push(`Topics discussed: ${[...topics].join(', ')}.`);
+  // ─── Deep Language Pattern Extraction ──────────────────────
+  const commonFillers = ['acha','hmm','oy','haan','naa','thik','bhai','arey','aare','ha','hn','ji','accha','theek','arre'];
+  const fillerFreq: Record<string, number> = {};
+  for (const m of observedMessages) {
+    for (const w of m.content.toLowerCase().split(/\s+/)) {
+      if (commonFillers.includes(w)) fillerFreq[w] = (fillerFreq[w] || 0) + 1;
+    }
   }
 
-  summaryParts.push(`Mujtaba's style: avg reply ${avgMujtabaLen} chars, ${usesQuestions ? 'asks questions' : 'mostly statements'}. Common fillers: ${[...fillerWords].join(', ') || 'none detected'}.`);
+  // Sentence starters (first 2 words of each message)
+  const starters: string[] = [];
+  for (const m of observedMessages) {
+    const words = m.content.trim().split(/\s+/);
+    if (words.length >= 2) starters.push(words.slice(0, 2).join(' ').toLowerCase());
+    else if (words.length === 1) starters.push(words[0].toLowerCase());
+  }
 
-  // Condensed conversation flow (split into segments)
+  // Common phrases (recurring 2-3 word sequences from Mujtaba)
+  const phraseCounts: Record<string, number> = {};
+  for (const m of mujtabaMsgs) {
+    const words = m.content.toLowerCase().split(/\s+/);
+    for (let i = 0; i < words.length - 1; i++) {
+      const bigram = words[i] + ' ' + words[i+1];
+      phraseCounts[bigram] = (phraseCounts[bigram] || 0) + 1;
+      if (i < words.length - 2) {
+        const trigram = words[i] + ' ' + words[i+1] + ' ' + words[i+2];
+        phraseCounts[trigram] = (phraseCounts[trigram] || 0) + 1;
+      }
+    }
+  }
+  const commonPhrases = Object.entries(phraseCounts)
+    .filter(([, c]) => c >= 2)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 15)
+    .map(([p]) => p);
+
+  // Language mix detection
+  const bengaliWords = allText.match(/[অআইঈউঊঋএঐওঔকখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহড়ঢ়য়ৎংঃঁািীুূৃেৈোৌ]/g);
+  const englishWords = allText.match(/[a-zA-Z]{3,}/g);
+  const langMix = bengaliWords && bengaliWords.length > 5 ? 'sylheti/bangla mixed' : 'hinglish/english';
+  const hasEnglish = englishWords && englishWords.length > 3;
+
+  // Question style
+  const mujtabaQs = mujtabaMsgs.filter(m => m.content.includes('?'));
+  const questionStyle = mujtabaQs.length > 0 ? 'yes' : 'no';
+  const questionWords = mujtabaQs.map(m => {
+    const q = m.content.toLowerCase();
+    if (q.includes('kyu')) return 'kyu';
+    if (q.includes('kya')) return 'kya';
+    if (q.includes('kaise')) return 'kaise';
+    if (q.includes('kab')) return 'kab';
+    if (q.includes('kaha')) return 'kaha';
+    if (q.includes('kon')) return 'kon';
+    return 'other';
+  });
+
+  // ─── Knowledge Extraction ──────────────────────────────────
+  const knowledgeFacts: string[] = [];
+  for (const m of userMsgs) {
+    const lower = m.content.toLowerCase();
+    // Personal info patterns
+    const studyMatch = lower.match(/(study|padh|college|school|university|class|exam|semester|subject|teacher|lecture)/);
+    if (studyMatch) knowledgeFacts.push(`Education: user mentioned ${studyMatch[1]}`);
+    const workMatch = lower.match(/(job|work|office|company|boss|client|salary|business|profession)/);
+    if (workMatch) knowledgeFacts.push(`Work: user mentioned ${workMatch[1]}`);
+    const familyMatch = lower.match(/(maa|baap|dad|mom|father|mother|bhai|brother|didi|sister|wife|bibi|family|chacha|mama|khalu)/);
+    if (familyMatch) knowledgeFacts.push(`Family: user mentioned ${familyMatch[1]}`);
+    const healthMatch = lower.match(/(health|hospital|doctor|medical|sick|ill|pain|fever|cough|cold|operation|surgery|medicine|tablet)/);
+    if (healthMatch) knowledgeFacts.push(`Health: user mentioned ${healthMatch[1]}`);
+    const moneyMatch = lower.match(/(paisa|money|payment|bill|cost|price|rent|fee|loan|expense|salary)/);
+    if (moneyMatch) knowledgeFacts.push(`Finance: user mentioned ${moneyMatch[1]}`);
+    const timeMatch = lower.match(/(kal|aaj|aajkal|today|tomorrow|yesterday|next week|next month|saturday|sunday|monday|time|schedule)/);
+    if (timeMatch) knowledgeFacts.push(`Time: user mentioned ${timeMatch[1]}`);
+    // Named entities (capitalized words that aren't start-of-sentence)
+    const words = m.content.split(/\s+/);
+    for (const w of words) {
+      if (/^[A-Z][a-z]{2,}$/.test(w) && !['The','Aap','Ami','Tumi','Amar','Tomar','Akhon','Ektu','Kemon','Keno','Kintu'].includes(w)) {
+        knowledgeFacts.push(`Entity: mentioned "${w}"`);
+        break;
+      }
+    }
+  }
+  const uniqueFacts = [...new Set(knowledgeFacts)].slice(0, 20);
+
+  // ─── Conversation Dynamics ─────────────────────────────────
+  const avgMujtabaLen = Math.round(mujtabaMsgs.reduce((s, m) => s + m.content.length, 0) / mujtabaMsgs.length);
+  const avgUserLen = userMsgs.length > 0 ? Math.round(userMsgs.reduce((s, m) => s + m.content.length, 0) / userMsgs.length) : 0;
+  const topics = [...new Set(uniqueFacts.map(f => f.split(':')[0].trim()))];
+
+  // ─── Save Global Language Patterns ──────────────────────────
+  const langData = { patterns: { filler_freq: fillerFreq, common_sentence_starters: [...new Set(starters)].slice(0, 10), common_phrases: commonPhrases, language_mix: langMix, uses_english: hasEnglish, mujtaba_asks_questions: questionStyle, question_words: [...new Set(questionWords)], avg_reply_length_chars: avgMujtabaLen }, last_updated: new Date().toISOString(), source_phone: observePhone };
+  try {
+    let existing: any = { patterns: {} };
+    try { existing = JSON.parse(fs.readFileSync(learnedLangPath, 'utf-8')); } catch { /* new file */ }
+    // Merge: keep existing patterns, add/update new ones
+    for (const [k, v] of Object.entries(langData.patterns)) {
+      if (Array.isArray(v)) {
+        const existingArr = (existing.patterns[k] as string[]) || [];
+        existing.patterns[k] = [...new Set([...v, ...existingArr])].slice(0, 30);
+      } else if (typeof v === 'object' && v !== null) {
+        existing.patterns[k] = { ...existing.patterns[k], ...v } as any;
+      } else {
+        (existing.patterns as any)[k] = v;
+      }
+    }
+    existing.last_updated = new Date().toISOString();
+    existing.source_phone = observePhone;
+    fs.writeFileSync(learnedLangPath, JSON.stringify(existing, null, 2));
+    console.log(`🌐 Global language patterns saved (${commonPhrases.length} phrases, ${Object.keys(fillerFreq).length} fillers)`);
+  } catch (e) { console.log('⚠️ Failed to save language patterns:', e); }
+
+  // ─── Save Global Knowledge ──────────────────────────────────
+  if (uniqueFacts.length > 0) {
+    try {
+      let knowData: any[] = [];
+      try { knowData = JSON.parse(fs.readFileSync(learnedKnowPath, 'utf-8')); } catch { /* new file */ }
+      for (const fact of uniqueFacts) {
+        const existingEntry = knowData.find((e: any) => e.fact === fact);
+        if (existingEntry) {
+          existingEntry.count = (existingEntry.count || 1) + 1;
+          existingEntry.last_seen = new Date().toISOString();
+        } else {
+          knowData.push({ fact, category: fact.split(':')[0].trim(), source_phone: observePhone, learned_at: new Date().toISOString(), last_seen: new Date().toISOString(), count: 1 });
+        }
+      }
+      if (knowData.length > 200) knowData = knowData.slice(-200);
+      fs.writeFileSync(learnedKnowPath, JSON.stringify(knowData, null, 2));
+      console.log(`🧠 Global knowledge saved (${uniqueFacts.length} facts)`);
+    } catch (e) { console.log('⚠️ Failed to save knowledge:', e); }
+  }
+
+  // ─── Build Per-Contact Summary ──────────────────────────────
+  const summaryParts: string[] = [];
+  summaryParts.push(`📋 OBSERVED CONVERSATION SUMMARY (${totalMsgs} msgs, ${userCount} user + ${mujtabaCount} Mujtaba):`);
+  if (topics.length > 0) summaryParts.push(`Topics discussed: ${topics.join(', ')}.`);
+  if (uniqueFacts.length > 0) summaryParts.push(`Known facts: ${uniqueFacts.slice(0, 8).join('; ')}.`);
+  summaryParts.push(`Mujtaba's style: avg ${avgMujtabaLen} chars/reply, ${questionStyle === 'yes' ? 'asks questions' : 'mostly statements'}. Language: ${langMix}.`);
+  if (commonPhrases.length > 0) summaryParts.push(`Common phrases: ${commonPhrases.slice(0, 8).join(', ')}.`);
+  if (Object.keys(fillerFreq).length > 0) summaryParts.push(`Fillers: ${Object.entries(fillerFreq).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([w, c]) => `${w}(${c}x)`).join(', ')}.`);
+
+  // Condensed flow
   const segments: string[] = [];
   let currentSegment = '';
   let lastSpeaker = '';
   for (const m of observedMessages) {
     const speaker = m.role === 'mujtaba' ? 'M' : 'U';
-    if (speaker !== lastSpeaker && currentSegment) {
-      segments.push(currentSegment.trim());
-      currentSegment = '';
-    }
+    if (speaker !== lastSpeaker && currentSegment) { segments.push(currentSegment.trim()); currentSegment = ''; }
     currentSegment += `${speaker}: ${m.content} | `;
     lastSpeaker = speaker;
   }
   if (currentSegment) segments.push(currentSegment.trim());
-
-  summaryParts.push(`Conversation flow (${segments.length} exchanges):`);
-  segments.slice(0, 15).forEach((seg, i) => {
-    summaryParts.push(`  ${i + 1}. ${seg.slice(0, 120)}...`);
-  });
+  summaryParts.push(`Flow (${segments.length} exchanges):`);
+  segments.slice(0, 10).forEach((seg, i) => summaryParts.push(`  ${i + 1}. ${seg.slice(0, 130)}...`));
 
   const fullSummary = summaryParts.join('\n');
 
@@ -181,16 +288,19 @@ function generateObservationSummary() {
     contact.observation_summary = fullSummary;
     contact.observed_style = {
       avg_reply_length: avgMujtabaLen,
-      uses_questions: usesQuestions,
-      mujtaba_fillers: [...fillerWords],
-      detected_topics: [...topics],
+      user_avg_length: avgUserLen,
+      uses_questions: questionStyle === 'yes',
+      mujtaba_fillers: Object.keys(fillerFreq),
+      detected_topics: topics,
+      common_phrases: commonPhrases.slice(0, 10),
+      language_mix: langMix,
       total_messages: totalMsgs,
       last_observed: new Date().toISOString(),
     };
-    if (topics.size > 0) contact.last_topic = [...topics][0];
+    if (topics.length > 0) contact.last_topic = topics[0];
     data.last_updated = new Date().toISOString();
     fs.writeFileSync(contactsPath, JSON.stringify(data, null, 2));
-    console.log(`📚 Observation summary saved for ${observePhone} — ${totalMsgs} msgs, topics: ${[...topics].join(', ')}`);
+    console.log(`📚 Per-contact summary saved for ${observePhone} — ${totalMsgs} msgs, ${uniqueFacts.length} facts`);
   } catch { /* silent */ }
 }
 
@@ -243,6 +353,19 @@ function processBatchedMessage(
         return;
       }
 
+      // --- Pre-process short greetings: "Jii?", "Hello?" etc → simple reply, no LLM ---
+      const greetingOnlyPattern = /^(jii\??|ji\??|hello\??|hmm\??|hm\??|oye\??|arey\??|hallo\??|hey\??)$/i;
+      if (greetingOnlyPattern.test(combinedText.trim())) {
+        const greetingReplies = ['Jii, kemon acho?', 'Jii, bolun.', 'Hmm, bolun.', 'Jii, bolen kya baat hai?'];
+        const reply = greetingReplies[Math.floor(Math.random() * greetingReplies.length)];
+        console.log(`👋 Greeting-only detected — simple reply`);
+        await showTyping(senderId, 1000);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await sendWhatsAppMessage(senderId, reply);
+        await saveMessage(senderId, undefined, 'outgoing', reply, true);
+        return;
+      }
+
       // Get conversation history
       const history = await getConversationHistory(senderId, 10);
 
@@ -262,10 +385,20 @@ function processBatchedMessage(
         result.text = acknowledgments[Math.floor(Math.random() * acknowledgments.length)];
         console.log('✂️ Ultra-short ending detected — single-word acknowledgment');
       }
-      // Level 2: User consistently giving short replies → trim to 1 sentence
+      // Level 2: User consistently giving short replies → trim to last complete sentence
       else if (allShort && noQuestion && replyIsLong) {
-        result.text = result.text.split(' ').slice(0, 12).join(' ').trim() + '.';
-        console.log('✂️ Reply trimmed (end enforcer)');
+        const words = result.text.split(' ');
+        const trimmed = words.slice(0, 12).join(' ').trim();
+        // Find last sentence-ending punctuation before 12th word, cut there
+        const lastSentenceEnd = Math.max(trimmed.lastIndexOf('.'), trimmed.lastIndexOf('!'), trimmed.lastIndexOf('?'));
+        if (lastSentenceEnd > 0) {
+          result.text = trimmed.slice(0, lastSentenceEnd + 1);
+        } else {
+          // No sentence break found — keep only if it's a complete thought, otherwise send acknowledgment
+          const acknowledgments = ['thik ache', 'acha', 'thik hai', 'hmm'];
+          result.text = acknowledgments[Math.floor(Math.random() * acknowledgments.length)];
+        }
+        console.log('✂️ Reply trimmed to complete sentence (end enforcer)');
       }
 
       // --- Serious mode: Detect urgent/harsh keywords → remove jokes/emojis ---

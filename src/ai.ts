@@ -798,7 +798,7 @@ export async function generateReply(
   // Append contact summary to contactInfo
   let enhancedContactInfo = contactInfo + (contactSummary ? `\n\n${contactSummary}` : '');
   if (observationSummary) {
-    enhancedContactInfo += `\n\nOBSERVED CONVERSATION SUMMARY (Mujtaba was talking to this person earlier — learn from his style):\n${observationSummary}`;
+    enhancedContactInfo += `\n\n=== LEARNED FROM OBSERVING CONVERSATIONS ===\n${observationSummary}\n\nIMPORTANT: The global knowledge and language patterns above were observed from various conversations. They are tools you can use everywhere, but ADAPT them to each person. If talking to an elder, use respectful language even if the patterns show casual style. If talking to a friend, you can be casual. Always match the person you're talking to RIGHT NOW.`;
   }
 
   let systemPrompt = buildSystemPrompt(
@@ -1102,15 +1102,54 @@ export function setObserveMode(on: boolean, phone?: string): string {
 }
 
 export function getObservedContext(phone: string): string {
+  const parts: string[] = [];
+
+  // 1) Per-contact observation summary
   const contactsPath = path.join(dataDir, 'contacts.json');
   try {
     const data = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
     const contact = data.contacts[phone];
     if (contact?.observation_summary) {
-      return contact.observation_summary;
+      parts.push(contact.observation_summary);
     }
   } catch { /* silent */ }
-  return '';
+
+  // 2) Global learned knowledge (from all observed conversations)
+  const learnPath = path.join(dataDir, 'learned_knowledge.json');
+  try {
+    const knowledge = JSON.parse(fs.readFileSync(learnPath, 'utf-8'));
+    if (Array.isArray(knowledge) && knowledge.length > 0) {
+      const categories = [...new Set(knowledge.map((k: any) => k.category))];
+      parts.push('GLOBAL KNOWLEDGE (facts observed from other conversations — use with awareness):');
+      for (const cat of categories) {
+        const facts = knowledge.filter((k: any) => k.category === cat).slice(0, 3).map((k: any) => k.fact);
+        if (facts.length > 0) parts.push(`  ${cat}: ${facts.join('; ')}.`);
+      }
+    }
+  } catch { /* silent */ }
+
+  // 3) Global language patterns (from all observed conversations)
+  const langPath = path.join(dataDir, 'learned_language.json');
+  try {
+    const lang = JSON.parse(fs.readFileSync(langPath, 'utf-8'));
+    if (lang.patterns) {
+      parts.push('GLOBAL LANGUAGE PATTERNS (learned from observing conversations — adapt to each person):');
+      if (lang.patterns.language_mix) parts.push(`  Language style: ${lang.patterns.language_mix}.`);
+      if (lang.patterns.common_phrases?.length > 0) {
+        parts.push(`  Recurring phrases: ${lang.patterns.common_phrases.slice(0, 8).join(', ')}.`);
+      }
+      if (lang.patterns.common_sentence_starters?.length > 0) {
+        parts.push(`  Sentence starters observed: ${lang.patterns.common_sentence_starters.slice(0, 6).join(', ')}.`);
+      }
+      if (lang.patterns.mujtaba_asks_questions) {
+        parts.push(`  Note: When unsure, asking questions works well — observed from Mujtaba.`);
+      }
+    }
+  } catch { /* silent */ }
+
+  if (parts.length === 0) return '';
+
+  return parts.join('\n\n');
 }
 
 export { loadContext, saveContact, markScriptReported };

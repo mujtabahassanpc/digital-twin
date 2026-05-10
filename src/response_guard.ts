@@ -56,25 +56,26 @@ export function checkLength(reply: string, userMessage: string): GuardResult {
   const replyLen = reply.trim().length;
 
   // Very short user message (end-of-conversation signals)
-  // Only block when reply is excessively long (80+ chars for a 1-2 word msg)
-  if (userLen <= 5 && replyLen > 80) {
+  // Allow greeting-like short messages more room (100 chars), block only extreme cases
+  if (userLen <= 5 && replyLen > 100) {
     return {
       passed: false,
       reason: 'overlong_for_short_message',
-      suggestion: `User sent ${userLen} chars ("${userMessage.slice(0, 30)}"), reply should be 1 sentence max.`,
+      suggestion: `User sent ${userLen} chars ("${userMessage.slice(0, 30)}"), reply should be 1 sentence max (under 100 chars).`,
     };
   }
 
-  // User message is short, reply is disproportionately long
-  // Use generous multiplier (8x) to avoid blocking natural responses to short questions
-  if (userLen < 10 && replyLen > userLen * 8 && replyLen > 40) {
+  // User message is 5-10 chars — only block if reply is extremely disproportionate (12x+)
+  if (userLen > 5 && userLen < 10 && replyLen > userLen * 12 && replyLen > 60) {
     return {
       passed: false,
       reason: 'disproportionate_length',
-      suggestion: `User sent ${userLen} chars, reply is ${replyLen} chars. Keep it proportional.`,
+      suggestion: `User sent ${userLen} chars, reply is ${replyLen} chars. Keep it to 1 sentence.`,
     };
   }
 
+  // Legacy catch-all for userLen > 10 already handled above. Everything under 10 chars
+  // is covered by the two checks above. Don't add more here.
   return { passed: true, reason: '', suggestion: '' };
 }
 
