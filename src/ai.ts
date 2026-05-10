@@ -12,6 +12,7 @@ const contextPath = path.join(dataDir, 'context.md');
 const contactsPath = path.join(dataDir, 'contacts.json');
 const scriptedRepliesPath = path.join(dataDir, 'scripted_replies.json');
 const languageExamplesPath = path.join(dataDir, 'language_examples.json');
+const styleProfilePath = path.join(dataDir, 'style_profile.json');
 
 // Per-sender reply tracking (bounded to prevent memory leaks)
 const recentReplies: Record<string, string[]> = {};
@@ -35,8 +36,7 @@ const providerCooldowns: Record<string, number> = {
   groq: 0,
   openrouter: 0,
   cohere: 0,
-  llmgtwy: 0,
-  sarvam: 0,
+  llmgtwy: 0
 };
 
 // ============================================================
@@ -57,6 +57,37 @@ function loadMahirInstructions(): string {
 
 function loadContext(): string {
   return loadFile(contextPath);
+}
+
+function loadStyleProfile(): string {
+  try {
+    const raw = fs.readFileSync(styleProfilePath, 'utf-8');
+    const data = JSON.parse(raw);
+    const parts: string[] = [];
+    if (data.slang_words?.length) {
+      parts.push(`Common slang: ${data.slang_words.slice(0, 20).join(', ')}`);
+    }
+    if (data.common_emojis?.length) {
+      parts.push(`Common emojis: ${data.common_emojis.join(' ')}`);
+    }
+    if (data.greetings?.length) {
+      parts.push(`Natural greetings: ${data.greetings.slice(0, 10).join(', ')}`);
+    }
+    if (data.response_style) {
+      const s = data.response_style;
+      parts.push(`Response style: ${s.avg_sentences || 2} sentence avg, ${s.use_questions ? 'uses questions' : 'mostly statements'}, ${s.match_sender_energy ? 'matches sender energy' : ''}`);
+    }
+    if (data.deflection_phrases?.length) {
+      parts.push(`Deflection phrases (use when unsure): ${data.deflection_phrases.slice(0, 5).join(' || ')}`);
+    }
+    if (data.forbidden_phrases?.length) {
+      parts.push(`NEVER use phrases like: ${data.forbidden_phrases.slice(0, 15).join(', ')}`);
+    }
+    if (parts.length === 0) return '';
+    return `## Style Profile (learned from Mujtaba's chat patterns)\n${parts.join('\n')}\n`;
+  } catch {
+    return '';
+  }
 }
 
 function loadLanguageExamples(): string {
@@ -150,6 +181,7 @@ function buildSystemPrompt(
   context: string,
   contactInfo: string,
   languageExamples: string,
+  styleProfile: string,
   timeContext: string,
   history: any[],
   senderName?: string,
@@ -169,6 +201,11 @@ function buildSystemPrompt(
 
   if (relationshipInstruction) {
     prompt += `RELATIONSHIP NOTE:\n${relationshipInstruction}\n\n`;
+  }
+
+  // Style profile from chat analysis
+  if (styleProfile) {
+    prompt += `${styleProfile}\n\n`;
   }
 
   // Language examples taught via /teach
@@ -674,6 +711,7 @@ export async function generateReply(
   const instructions = loadMahirInstructions();
   const context = loadContext();
   const languageExamples = loadLanguageExamples();
+  const styleProfile = loadStyleProfile();
   const contactsData = loadContacts();
   const contact = contactsData.contacts[id];
   const contactInfo = contact ? JSON.stringify(contact, null, 2) : '';
@@ -713,10 +751,11 @@ export async function generateReply(
     context,
     contactInfo,
     languageExamples,
+    styleProfile,
     timeContext,
     conversationHistory,
     senderName,
-    relationshipInstruction,
+    relationshipInstruction
   );
 
   // Append scripted reply injection if active
@@ -898,4 +937,4 @@ export async function generateSpeech(text: string): Promise<Buffer | null> {
   }
 }
 
-export { markScriptReported };
+export { loadContext, saveContact, markScriptReported };

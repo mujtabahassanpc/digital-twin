@@ -143,4 +143,5 @@ if (isMainModule && process.argv[2]) {
   analyzeStyle(messages, userName);
 }
 
+export { parseWhatsAppExport, analyzeStyle };
 

@@ -1,5 +1,5 @@
 import { config } from './config.js';
-import { getPool } from './db.js';
+import { getConversationHistory, getPool } from './db.js';
 import fs from 'fs';
 import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -297,7 +297,8 @@ export async function handleTelegramCommand(command: string, args: string): Prom
 <b>👤 Context & Memory:</b>
 <b>/mujtaba [status]</b> — Set Mujtaba's status (busy/available/school/office/sleeping/eating/driving/meeting/travelling)
 <b>/context [text]</b> — Add custom context instruction
-<b>/contacts</b> — View saved contact memories
+<b>/contacts</b> — View recent contacts (from DB)
+<b>/contactmem</b> — View saved contact memories (with relationships)
 <b>/forget [senderId]</b> — Clear contact memory for a person
 
 <b>🎭 Scripted Replies:</b>
@@ -418,6 +419,27 @@ export async function handleTelegramCommand(command: string, args: string): Prom
         return sendTelegramMessage(`✅ Context updated:\n\n"${args}"`);
       } catch {
         return sendTelegramMessage('❌ Failed to update context');
+      }
+    }
+
+    case 'contactmem': {
+      try {
+        const data = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
+        const savedContacts = Object.entries(data.contacts || {});
+        if (savedContacts.length === 0) {
+          return sendTelegramMessage('📋 Koi saved contact nahi hai abhi');
+        }
+        const list = savedContacts.slice(-10).map(([id, info]: [string, any]) => {
+          const name = info.name || 'Unknown';
+          const topic = info.last_topic || 'N/A';
+          const count = info.conversation_count || 0;
+          const last = info.last_message_summary || '';
+          const rel = info.relationship ? ` | ${info.relationship}` : '';
+          return `• *${name}* (${id})${rel}\n  Topic: ${topic} | Chats: ${count}\n  Last: "${last.substring(0, 50)}..."`;
+        }).join('\n\n');
+        return sendTelegramMessage(`📋 *Saved Contacts:* (${savedContacts.length} total)\n\n${list}`);
+      } catch {
+        return sendTelegramMessage('📋 Contacts file not found');
       }
     }
 
