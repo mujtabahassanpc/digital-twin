@@ -44,6 +44,110 @@ const MAX_VOICE_PER_CHAT = 5;
 const messageBuffers: Record<string, { messages: { text: string; timestamp: number }[]; timer: ReturnType<typeof setTimeout> }> = {};
 const BATCH_WINDOW_MS = 3000;
 
+// Observe Mode — Mujtaba talks, Mahir watches & learns
+let observeMode = false;
+let observePhone: string | null = null;
+let observeStartTime: string | null = null;
+const observedMessages: { role: 'user' | 'mujtaba'; content: string; timestamp: string }[] = [];
+const observationsPath = path.join(__dirname, '..', 'data', 'observations.json');
+
+function toggleObserve(phone: string | null): string {
+  if (!phone) {
+    // Turn off
+    if (observeMode && observedMessages.length > 0) {
+      saveObservation();
+      extractLearnings();
+    }
+    observeMode = false;
+    observePhone = null;
+    observeStartTime = null;
+    observedMessages.length = 0;
+    return '🔍 Observe mode OFF. Learnings saved.';
+  }
+  // Turn on — if switching from another phone, save previous observation first
+  if (observeMode && observedMessages.length > 0) {
+    saveObservation();
+    extractLearnings();
+  }
+  observeMode = true;
+  observePhone = phone;
+  observeStartTime = new Date().toISOString();
+  observedMessages.length = 0;
+  return `🔍 Observe mode ON for ${phone}. Mahir will watch & learn from this conversation.`;
+}
+
+function saveObservation() {
+  if (observedMessages.length === 0) return;
+  let all: any[] = [];
+  try { all = JSON.parse(fs.readFileSync(observationsPath, 'utf-8')); } catch { /* new file */ }
+  all.push({
+    phone: observePhone,
+    startedAt: observeStartTime,
+    endedAt: new Date().toISOString(),
+    messages: [...observedMessages],
+  });
+  // Keep last 50 observations max
+  if (all.length > 50) all = all.slice(-50);
+  fs.writeFileSync(observationsPath, JSON.stringify(all, null, 2));
+  console.log(`📝 Observation saved for ${observePhone} (${observedMessages.length} messages)`);
+}
+
+function extractLearnings() {
+  if (observedMessages.length < 2) return;
+  // Analyze: what topics, language, tone did Mujtaba use?
+  const mujtabaMsgs = observedMessages.filter(m => m.role === 'mujtaba');
+  const userMsgs = observedMessages.filter(m => m.role === 'user');
+  if (mujtabaMsgs.length === 0) return;
+
+  // Extract language patterns
+  const avgMujtabaLen = Math.round(mujtabaMsgs.reduce((s, m) => s + m.content.length, 0) / mujtabaMsgs.length);
+  const usesQuestions = mujtabaMsgs.some(m => m.content.includes('?'));
+  const commonWords = new Set<string>();
+  mujtabaMsgs.forEach(m => {
+    m.content.toLowerCase().split(/\s+/).filter(w => ['acha','hmm','oy','haan','naa','thik','bhai','arey','aare','ha'].includes(w)).forEach(w => commonWords.add(w));
+  });
+
+  // Find topics from user messages
+  const topicKeywords = ['exam','school','college','job','work','office','family','bhai','maa','baap','paisa','money','health','medical','shadi','marriage'];
+  const topics = new Set<string>();
+  userMsgs.forEach(m => {
+    const lower = m.content.toLowerCase();
+    topicKeywords.forEach(t => { if (lower.includes(t)) topics.add(t); });
+  });
+
+  // Save learnings to contacts
+  if (!observePhone) return;
+  const contactsPath = path.join(__dirname, '..', 'data', 'contacts.json');
+  try {
+    const data = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
+    if (!data.contacts[observePhone]) data.contacts[observePhone] = {};
+    const contact = data.contacts[observePhone];
+    contact.observed_style = {
+      avg_reply_length: avgMujtabaLen,
+      uses_questions: usesQuestions,
+      mujtaba_fillers: [...commonWords],
+      detected_topics: [...topics],
+      last_observed: new Date().toISOString(),
+    };
+    if (topics.size > 0) contact.last_topic = [...topics][0];
+    data.last_updated = new Date().toISOString();
+    fs.writeFileSync(contactsPath, JSON.stringify(data, null, 2));
+    console.log(`📚 Learnings extracted for ${observePhone}: ${[...topics].join(', ')}, avg len ${avgMujtabaLen} chars`);
+  } catch { /* silent */ }
+}
+
+function getObservedContext(phone: string): string {
+  if (!observeMode || observePhone !== phone || observedMessages.length === 0) return '';
+  const recent = observedMessages.slice(-6);
+  let ctx = '## Mujtaba is personally handling this conversation (OBSERVED):\n';
+  for (const m of recent) {
+    const speaker = m.role === 'mujtaba' ? '👤 Mujtaba' : '💬 User';
+    ctx += `${speaker}: ${m.content}\n`;
+  }
+  ctx += '\nNote: Mujtaba is talking directly. Mahir should learn from this style.\n';
+  return ctx;
+}
+
 function processBatchedMessage(
   senderId: string,
   senderName: string,
@@ -55,9 +159,14 @@ function processBatchedMessage(
       await saveMessage(senderId, senderName, 'incoming', combinedText, false);
       incrementDbCredits();
 
-      const lower = combinedText.toLowerCase();
+      // Observe mode: save incoming message without auto-replying
+      if (observeMode && observePhone === senderId) {
+        observedMessages.push({ role: 'user', content: combinedText, timestamp: new Date().toISOString() });
+        console.log(`🔍 Observe: User (${senderName}) said: "${combinedText.slice(0, 60)}..."`);
+        return;
+      }
 
-      // Check if this looks like an important conversation
+      const lower = combinedText.toLowerCase();
       const isImportant = importantConversationTriggers.some((phrase) => lower.includes(phrase));
 
       if (isImportant) {
@@ -274,6 +383,14 @@ function splitIntoMessages(text: string): string[] {
 
   return chunks.filter(m => m.length > 0);
 }
+
+// Observe: when Mujtaba replies, save for learning
+whatsappEmitter.on('own-message', (data: { senderId: string; text: string }) => {
+  if (observeMode && observePhone === data.senderId) {
+    observedMessages.push({ role: 'mujtaba', content: data.text, timestamp: new Date().toISOString() });
+    console.log(`🔍 Observe: Mujtaba replied to ${data.senderId}: "${data.text.slice(0, 60)}..."`);
+  }
+});
 
 whatsappEmitter.on('message', async (data: { senderId: string; senderName: string; text: string }) => {
   try {
@@ -513,6 +630,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   res.status(500).json({ error: 'Internal server error' });
 });
 
+export { toggleObserve, getObservedContext };
 export default app;
 
 // Start server if running directly

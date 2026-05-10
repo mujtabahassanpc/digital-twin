@@ -95,15 +95,15 @@ export async function startWhatsApp() {
 
   sock.ev.on('messages.upsert', async (m) => {
     const msg = m.messages[0];
-    if (!msg.message || msg.key.fromMe) return;
+    if (!msg.message) return;
 
     const senderId = msg.key.remoteJid!;
-    const senderName = msg.pushName || 'Unknown';
+    const isFromMe = !!msg.key.fromMe;
+    const senderName = isFromMe ? 'Mujtaba' : (msg.pushName || 'Unknown');
 
     // Extract text from various message types
     let text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
 
-    // Handle image captions — with Vision processing if enabled
     if (msg.message?.imageMessage) {
       const caption = msg.message.imageMessage.caption;
       if (config.mediaProcessing) {
@@ -124,7 +124,6 @@ export async function startWhatsApp() {
       }
     }
 
-    // Handle voice notes — with STT if enabled
     if (msg.message?.audioMessage) {
       if (config.mediaProcessing) {
         try {
@@ -143,23 +142,24 @@ export async function startWhatsApp() {
       }
     }
 
-    // Handle video
     if (msg.message?.videoMessage) {
       const caption = msg.message.videoMessage.caption;
       text = caption ? `[Video] ${caption}` : '[Video]';
     }
 
-    // Handle document
     if (msg.message?.documentMessage) {
       text = `[Document: ${msg.message.documentMessage.fileName || 'file'}]`;
     }
 
-    // Handle sticker
     if (msg.message?.stickerMessage) {
       text = '[Sticker]';
     }
 
-    if (text) {
+    if (!text) return;
+
+    if (isFromMe) {
+      whatsappEmitter.emit('own-message', { senderId, text });
+    } else {
       console.log(`Message from ${senderName} (${senderId}): ${text}`);
       whatsappEmitter.emit('message', { senderId, senderName, text });
     }

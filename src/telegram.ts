@@ -315,6 +315,10 @@ export async function handleTelegramCommand(command: string, args: string): Prom
 <b>/slist</b> — View all pending schedules
 <b>/sdel [id]</b> — Delete a pending schedule
 
+<b>🔍 Observe Mode:</b>
+<b>/observe [phone]</b> — Mahir watches the conversation, learns your style
+<b>/observe off</b> — Stop observing, save learnings
+
 <b>💬 Reply:</b>
 <b>/reply [number] [msg]</b> — Send manual WhatsApp reply
 
@@ -790,6 +794,13 @@ export async function handleTelegramCommand(command: string, args: string): Prom
         return sendTelegramMessage(`✅ Schedule <code>${id}</code> deleted.`);
       }
       return sendTelegramMessage(`❌ Schedule not found: ${id}`);
+    }
+
+    case 'observe': {
+      const phone = args.trim();
+      const { toggleObserve } = await import('./index.js') as any;
+      const msg = toggleObserve(phone || null);
+      return sendTelegramMessage(msg);
     }
 
     default:

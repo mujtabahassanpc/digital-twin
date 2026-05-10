@@ -1070,4 +1070,30 @@ export function markScheduleSent(id: string, error?: string) {
   }
 }
 
+// ============================================================
+// OBSERVE MODE — Shared state for Mujtaba's conversation observation
+// ============================================================
+
+let _observeMode = false;
+let _observePhone: string | null = null;
+
+export function isObserveMode(): boolean {
+  return _observeMode;
+}
+
+export function getObservePhone(): string | null {
+  return _observePhone;
+}
+
+export function setObserveMode(on: boolean, phone?: string): string {
+  if (!on) {
+    _observeMode = false;
+    _observePhone = null;
+    return '🔍 Observe mode OFF.';
+  }
+  _observeMode = true;
+  _observePhone = phone || null;
+  return `🔍 Observe mode ON for ${_observePhone}. Mahir will watch & learn.`;
+}
+
 export { loadContext, saveContact, markScriptReported };
