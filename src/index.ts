@@ -5,10 +5,12 @@ import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { initDatabase, getPool, closePool } from './db.js';
-import { generateReply, getProviderStatuses, isAnyProviderAvailable, getDbCreditsUsed, incrementDbCredits, resetDbCredits, getObservedContext } from './ai.js';
+import { generateReply, getProviderStatuses, isAnyProviderAvailable, getDbCreditsUsed, incrementDbCredits } from './ai.js';
 import { saveMessage, getConversationHistory } from './db.js';
 import { startWhatsApp, sendWhatsAppMessage, showTyping, sendVoiceMessage, getQRCode, isConnected, whatsappEmitter } from './whatsapp.js';
 import { sendInstantAlert, sendImportantConversationAlert, handleTelegramCommand } from './telegram.js';
+import { addAlert } from './alertManager.js';
+import { recordReply } from './feedback.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..');
@@ -309,6 +311,7 @@ function processBatchedMessage(
   senderName: string,
   combinedText: string
 ): Promise<void> {
+  const batchStartTime = Date.now();
   return (async () => {
     try {
       // Save incoming message (combined)
@@ -335,6 +338,7 @@ function processBatchedMessage(
         await sendImportantConversationAlert(senderName, senderId, context || 'No recent history');
 
         await showTyping(senderId, 2000);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
         const reply = 'acha bolbo, me sun raha hu 🤲';
         await sendWhatsAppMessage(senderId, reply);
         await saveMessage(senderId, undefined, 'outgoing', reply, true);
@@ -424,9 +428,8 @@ function processBatchedMessage(
         await sendWhatsAppMessage(senderId, clarificationMsg);
         await saveMessage(senderId, undefined, 'outgoing', clarificationMsg, true);
 
-        // Alert Mujtaba on Telegram
-        const { sendConfusionAlert } = await import('./telegram.js');
-        await sendConfusionAlert(senderName, senderId, combinedText, history);
+        // Buffer alert for Telegram digest
+        addAlert('confusion', senderName, senderId, combinedText, `Recent: ${history.slice(-2).map((h: any) => h.content).join(' | ')}`);
 
         // --- Save to learning queue (async) ---
         const queuePath = path.join(__dirname, '..', 'data', 'learning_queue.json');
@@ -459,7 +462,7 @@ function processBatchedMessage(
 
       for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
-        const delay = getTypingDelay(msg.length);
+        const delay = getTypingDelay(msg.length, combinedText, senderId);
 
         if (i > 0) {
           // Realistic pause between messages (human-like: 1-3 sec)
@@ -473,21 +476,27 @@ function processBatchedMessage(
         await saveMessage(senderId, undefined, 'outgoing', msg, true);
       }
 
+      // Track reply timing per contact
+      const timings = contactTypingCache.get(senderId) || [];
+      timings.push(Date.now() - batchStartTime);
+      if (timings.length > MAX_TIMING_SAMPLES) timings.shift();
+      contactTypingCache.set(senderId, timings);
+
       console.log(`💬 AI Reply to ${senderName} (${messages.length} message(s)): ${result.text.slice(0, 80)}...`);
 
-      // --- Script execution report ---
+      // Record reply in feedback buffer (for /rate command)
+      recordReply(senderId, senderName, combinedText, result.text);
+
+      // --- Script execution report → buffer for digest ---
       if (result.scriptTriggered) {
-        const { sendTelegramMessage } = await import('./telegram.js');
-        await sendTelegramMessage(`📋 <b>Script Executed</b> for <b>${senderName}</b> (${senderId})\n\nMahir replied: "${result.text.slice(0, 200)}"\n\nOriginal instruction: "${result.scriptTriggered.slice(0, 150)}"`).catch(() => {});
-        // Mark script as reported
+        addAlert('script_executed', senderName, senderId, result.scriptTriggered, `Mahir replied: "${result.text.slice(0, 150)}"`);
         const { markScriptReported } = await import('./ai.js');
         markScriptReported(senderId);
       }
 
-      // --- "Acha Bolbo" / Inform Promise Detection ---
+      // --- "Acha Bolbo" / Inform Promise Detection → buffer for digest ---
       if (result.hasInformPromise) {
-        const { sendInformAlert } = await import('./telegram.js');
-        await sendInformAlert(senderName, senderId, combinedText, result.text).catch(() => {});
+        addAlert('inform_promise', senderName, senderId, combinedText, `Mahir replied: "${result.text.slice(0, 150)}"`);
       }
 
       // --- Voice Reply — user asked Mahir to send voice ---
@@ -518,22 +527,94 @@ function processBatchedMessage(
           console.log(`⏭️ Voice limit reached for ${senderName} (${MAX_VOICE_PER_CHAT})`);
         }
       }
+      // --- Cliffhanger follow-up: user trails off with ... or ? ---
+      const trimmed = combinedText.trim();
+      const isCliffhanger = /\.{2,}\s*$/.test(trimmed) || (trimmed.endsWith('?') && trimmed.split(/\s+/).length <= 4);
+      const replyHasQuestion = result.text && /[?]/.test(result.text);
+      if (isCliffhanger && !replyHasQuestion && !result.hasInformPromise && !result.scriptTriggered) {
+        const followUps = ['Aur phir kya?', 'Phir kya hua?', 'Aage batao na?', 'Hmm, aur?', 'Achha, phir?', 'Matlab?'];
+        const followUp = followUps[Math.floor(Math.random() * followUps.length)];
+        await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
+        await showTyping(senderId, 1200);
+        await new Promise(r => setTimeout(r, 1200));
+        await sendWhatsAppMessage(senderId, followUp);
+        await saveMessage(senderId, undefined, 'outgoing', followUp, true);
+        console.log(`🔚 Cliffhanger follow-up sent to ${senderName}: "${followUp}"`);
+      }
     } catch (error) {
       console.error('Error processing message:', error);
     }
   })();
 }
 
-function getTypingDelay(len: number): number {
-  // Realistic typing: short messages fast, long messages with natural pace
-  // ~40 chars/sec with human variation
+const complexityWords = [
+  'kyunki', 'wajah', 'actually', 'basically', 'however', 'although',
+  'therefore', 'meanwhile', 'nevertheless', 'particularly',
+  'situation', 'understanding', 'experience', 'relationship',
+  'responsibility', 'communication',
+];
+
+function getTypingDelay(
+  msgLen: number,
+  incomingMsg?: string,
+  senderId?: string,
+): number {
   let base: number;
-  if (len <= 10) base = 700 + Math.random() * 500;       // 0.7-1.2s for very short
-  else if (len <= 30) base = 1000 + Math.random() * 800;  // 1-1.8s for short
-  else if (len <= 80) base = 1500 + Math.random() * 1000; // 1.5-2.5s for medium
-  else base = 2200 + Math.random() * 1500;                // 2.2-3.7s for long
-  return Math.round(base);
+  if (msgLen <= 10) base = 700 + Math.random() * 500;
+  else if (msgLen <= 30) base = 1000 + Math.random() * 800;
+  else if (msgLen <= 80) base = 1500 + Math.random() * 1000;
+  else base = 2200 + Math.random() * 1500;
+
+  // #1: If incoming message has typos, add "correcting" pause
+  if (incomingMsg) {
+    const words = incomingMsg.split(/\s+/);
+    const typoCount = words.filter(w => {
+      if (w.length < 3) return false;
+      const normalized = w.toLowerCase().replace(/[^a-z]/g, '');
+      // Simple typo heuristic: repeated letters, missing common chars
+      if (/(.)\1{2,}/.test(normalized)) return true; // "hellooo"
+      if (/^[^aeiou]{4,}$/.test(normalized)) return true; // "thghl" no vowels
+      return false;
+    }).length;
+
+    if (typoCount > 0) {
+      base += typoCount * 600 + Math.random() * 400;
+    }
+  }
+
+  // #2: Complex message → longer thinking pause
+  if (incomingMsg) {
+    const questionCount = (incomingMsg.match(/\?/g) || []).length;
+    const complexWordCount = complexityWords.filter(w =>
+      incomingMsg.toLowerCase().includes(w)
+    ).length;
+
+    if (questionCount >= 2 || complexWordCount > 0 || incomingMsg.length > 150) {
+      base += 800 + Math.random() * 700;
+    }
+  }
+
+  // #3: Cliffhanger — incomplete message ending with ...
+  if (incomingMsg && /\.{3,}\s*$/.test(incomingMsg.trim())) {
+    base += 1200 + Math.random() * 800;
+  }
+
+  // #4: Vary by contact — store avg reply time per sender
+  const contactTimings = contactTypingCache.get(senderId || '');
+  if (contactTimings && contactTimings.length > 3) {
+    const avg = contactTimings.reduce((a, b) => a + b, 0) / contactTimings.length;
+    // If user typically replies fast, Mahir replies slightly faster too
+    if (avg < 3000) base = base * 0.85;
+    else if (avg > 10000) base = base * 1.15;
+  }
+
+  return Math.round(Math.max(500, base));
 }
+
+// Track per-contact reply timings for natural pacing
+const contactTypingCache = new Map<string, number[]>();
+const MAX_TIMING_SAMPLES = 10;
+
 
 function splitIntoMessages(text: string): string[] {
   // If short, just one message
@@ -622,6 +703,18 @@ async function pollTelegram() {
           const args = parts.slice(1).join(' ');
           console.log(`📩 Telegram command: /${command} ${args}`);
           await handleTelegramCommand(command, args);
+        } else {
+          // Plain text — check for alert-summary keywords
+          const lower = msg.text.toLowerCase();
+          if (/^(kya hua|kuch bata|bol|alerts|digest do|summary|kya chal raha|update)/i.test(lower)) {
+            const { getPendingCount, flushAndSend } = await import('./alertManager.js');
+            if (getPendingCount() > 0) {
+              await flushAndSend('📋 Flushed on user request');
+            } else {
+              const { sendTelegramMessage } = await import('./telegram.js');
+              await sendTelegramMessage('📋 Koi pending alert nahi hai. Sab normal hai.');
+            }
+          }
         }
 
         // Handle callback queries (button clicks)
@@ -896,7 +989,6 @@ function startScheduleChecker() {
       for (const s of due) {
         console.log(`⏰ Sending scheduled message to ${s.targetPhone}: "${s.message.slice(0, 50)}..."`);
         try {
-          const { sendWhatsAppMessage } = await import('./whatsapp.js') as any;
           await sendWhatsAppMessage(s.targetPhone, `${s.message}\n\n— Mahir Abher 🤖`);
           markScheduleSent(s.id);
           const { sendTelegramMessage } = await import('./telegram.js') as any;
@@ -918,17 +1010,23 @@ async function shutdownGracefully(signal: string) {
   console.log(`\n🛑 Received ${signal} — shutting down gracefully...`);
 
   // Flush message batch buffers (process remaining)
+  const flushPromises: Promise<void>[] = [];
   for (const [senderId, buffer] of Object.entries(messageBuffers)) {
     clearTimeout(buffer.timer);
     if (buffer.messages.length > 0) {
       const combined = buffer.messages.map(m => m.text).join('\n');
       console.log(`🔄 Flushing ${buffer.messages.length} queued message(s) from ${senderId}`);
-      processBatchedMessage(senderId, 'unknown', combined).catch(() => {});
+      flushPromises.push(processBatchedMessage(senderId, 'unknown', combined));
     }
   }
 
-  // Give time for last messages to send
-  await new Promise(r => setTimeout(r, 2000));
+  // Wait for all in-flight messages to complete (with timeout)
+  if (flushPromises.length > 0) {
+    await Promise.race([
+      Promise.all(flushPromises),
+      new Promise(r => setTimeout(r, 8000)),
+    ]);
+  }
 
   // Close DB pool
   await closePool().catch(() => {});

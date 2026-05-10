@@ -2,8 +2,6 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  WASocket,
-  PresenceData,
   downloadContentFromMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
@@ -24,7 +22,7 @@ if (!fs.existsSync(authDir)) {
   fs.mkdirSync(authDir, { recursive: true });
 }
 
-const msgRetryCounterCache = new NodeCache();
+const msgRetryCounterCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
 let sock: ReturnType<typeof makeWASocket> | null = null;
 let currentQR: string | null = null;
@@ -95,9 +93,9 @@ export async function startWhatsApp() {
 
   sock.ev.on('messages.upsert', async (m) => {
     const msg = m.messages[0];
-    if (!msg.message) return;
+    if (!msg?.message || !msg.key?.remoteJid) return;
 
-    const senderId = msg.key.remoteJid!;
+    const senderId = msg.key.remoteJid;
     const isFromMe = !!msg.key.fromMe;
     const senderName = isFromMe ? 'Mujtaba' : (msg.pushName || 'Unknown');
 
@@ -176,7 +174,7 @@ export async function showTyping(to: string, durationMs: number): Promise<void> 
       }
     }, durationMs);
   } catch (e) {
-    // silent
+    console.warn('⚠️ showTyping error:', e);
   }
 }
 
@@ -197,17 +195,18 @@ export function toJid(phoneNumber: string): string {
 
 export async function sendWhatsAppMessage(to: string, text: string) {
   if (!sock) throw new Error('WhatsApp not started');
+  const s = sock;
 
   try {
     const jid = to.includes('@') ? to : toJid(to);
-    const result = await sock!.sendMessage(jid, { text });
+    const result = await s.sendMessage(jid, { text });
     return result;
   } catch (err: any) {
     // If it's a JID decode error, try with @lid suffix
-    if (err?.message?.includes('jidDecode') || err?.message?.includes('invalid jid')) {
+    if (String(err?.message || '').includes('jidDecode') || String(err?.message || '').includes('invalid jid')) {
       const lidJid = to.includes('@') ? to : `${to.replace(/[^0-9]/g, '')}@lid`;
       console.log(`🔄 Retrying with LID JID: ${lidJid}`);
-      return sock!.sendMessage(lidJid, { text });
+      return s.sendMessage(lidJid, { text });
     }
     throw err;
   }
@@ -215,9 +214,10 @@ export async function sendWhatsAppMessage(to: string, text: string) {
 
 export async function sendVoiceMessage(to: string, audioBuffer: Buffer): Promise<void> {
   if (!sock) throw new Error('WhatsApp not started');
+  const s = sock;
   try {
     const jid = to.includes('@') ? to : toJid(to);
-    await sock!.sendMessage(jid, { audio: audioBuffer, mimetype: 'audio/ogg', ptt: true });
+    await s.sendMessage(jid, { audio: audioBuffer, mimetype: 'audio/ogg', ptt: true });
     console.log(`🎤 Voice message sent to ${jid}`);
   } catch (err: any) {
     console.error('Voice message error:', err);

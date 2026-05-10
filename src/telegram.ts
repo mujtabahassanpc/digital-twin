@@ -1,5 +1,5 @@
 import { config } from './config.js';
-import { getConversationHistory, getPool } from './db.js';
+import { getPool } from './db.js';
 import fs from 'fs';
 import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -161,52 +161,6 @@ Or use the button below to toggle busy mode.
   return sendTelegramMessage(text, keyboard);
 }
 
-export async function sendConfusionAlert(
-  senderName: string,
-  senderId: string,
-  userMessage: string,
-  history: any[]
-): Promise<boolean> {
-  const recentContext = history.slice(-4).map((h: any) => `${h.role === 'user' ? '👤' : '🤖'} ${h.content}`).join('\n');
-
-  const text = `🤔 <b>Mahir is Confused!</b>
-<b>From:</b> ${senderName} (${senderId})
-<b>User said:</b> "${userMessage}"
-
-<b>Recent context:</b>
-${recentContext || 'No recent history'}
-
-Mahir ne user se kaha: "bhai me samja nhi, ek baar phir se bolna?"
-
-⚡ Tu mujhe bata kya reply dena hai:
-<code>/reply ${senderId} your_response</code>
-
-Ya phir /context file me instruction add kar de jisse Mahir agli baar samajh jaye.
-
-— Mahir Abher`;
-
-  return sendTelegramMessage(text);
-}
-
-export async function sendInformAlert(
-  senderName: string,
-  senderId: string,
-  userMessage: string,
-  mahirReply: string
-): Promise<boolean> {
-  const text = `📢 <b>Mahir ne "Mujtaba ko bol dunga" kaha!</b>
-<b>From:</b> ${senderName} (${senderId})
-<b>User said:</b> "${userMessage.slice(0, 200)}"
-
-<b>Mahir replied:</b> "${mahirReply.slice(0, 300)}"
-
-⚠️ Mahir ne inform karne ka promise kiya hai. Tu iska reply de ya note kar le.
-
-— Mahir Abher`;
-
-  return sendTelegramMessage(text);
-}
-
 export async function sendStatusCommand(): Promise<boolean> {
   const { isConnected } = await import('./whatsapp.js');
   const message = `📊 <b>Mahir Status</b>
@@ -284,6 +238,10 @@ export async function handleTelegramCommand(command: string, args: string): Prom
 <b>/busy on</b> — Enable auto-reply
 <b>/busy off</b> — Disable auto-reply
 <b>/digest</b> — Send today's summary
+<b>/alerts</b> — Show buffered Mahir activity
+<b>/feedback</b> — Reply quality stats
+<b>/ratelist [phone] [n]</b> — Show recent replies to rate
+<b>/rate [id] good|ok|bad [reason]</b> — Rate a reply (helps Mahir learn)
 
 <b>🧠 Teach Mahir Language:</b>
 <b>/teach [message] | [reason]</b> — Add a language example with reason
@@ -360,6 +318,13 @@ export async function handleTelegramCommand(command: string, args: string): Prom
       } catch {
         return sendTelegramMessage('❌ Failed to generate digest');
       }
+
+    case 'alerts':
+      const { getPendingCount, flushAndSend } = await import('./alertManager.js');
+      if (getPendingCount() === 0) {
+        return sendTelegramMessage('📋 No pending alerts. Sab quiet hai.');
+      }
+      return flushAndSend('📋 Manual flush from /alerts');
 
     case 'mujtaba': {
       const status = args.toLowerCase().trim();
@@ -802,6 +767,18 @@ export async function handleTelegramCommand(command: string, args: string): Prom
       const msg = toggleObserve(phone || null);
       return sendTelegramMessage(msg);
     }
+
+    case 'ratelist':
+      const { handleRatingList } = await import('./feedback.js');
+      return handleRatingList(args);
+
+    case 'rate':
+      const { handleRateCommand } = await import('./feedback.js');
+      return handleRateCommand(args);
+
+    case 'feedback':
+      const { handleFeedbackCommand } = await import('./feedback.js');
+      return handleFeedbackCommand();
 
     default:
       return sendTelegramMessage(`❓ Unknown command: <code>/${command}</code>\nUse /help for available commands`);

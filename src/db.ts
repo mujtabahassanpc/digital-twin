@@ -1,4 +1,4 @@
-import { Pool, PoolConfig } from 'pg';
+import { Pool } from 'pg';
 import { config } from './config.js';
 
 let pool: ReturnType<typeof createPool> | null = null;

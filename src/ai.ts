@@ -4,6 +4,7 @@ import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { runResponseGuard, recordOutgoing, ConversationEntry } from './response_guard.js';
+import { getFeedbackContext } from './feedback.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, '..', 'data');
@@ -71,12 +72,41 @@ function getFallbackReply(): string {
 }
 
 // ============================================================
+// FILE CACHE (TTL-based, avoids repeated sync reads)
+// ============================================================
+
+const fileCache = new Map<string, { data: string; expiresAt: number }>();
+const CACHE_TTL_MS = 30_000; // 30 seconds
+const ALWAYS_FRESH = new Set(['contacts.json', 'language_examples.json']); // skip cache
+
+function cachedRead(filePath: string): string {
+  const fileName = path.basename(filePath);
+  if (!ALWAYS_FRESH.has(fileName)) {
+    const cached = fileCache.get(filePath);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.data;
+    }
+  }
+  const data = fs.readFileSync(filePath, 'utf-8');
+  fileCache.set(filePath, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+  return data;
+}
+
+function invalidateCache(filePath?: string) {
+  if (filePath) {
+    fileCache.delete(filePath);
+  } else {
+    fileCache.clear();
+  }
+}
+
+// ============================================================
 // FILE LOADERS
 // ============================================================
 
 function loadFile(filePath: string): string {
   try {
-    return fs.readFileSync(filePath, 'utf-8');
+    return cachedRead(filePath);
   } catch {
     return '';
   }
@@ -92,7 +122,7 @@ function loadContext(): string {
 
 function loadStyleProfile(): string {
   try {
-    const raw = fs.readFileSync(styleProfilePath, 'utf-8');
+    const raw = cachedRead(styleProfilePath);
     const data = JSON.parse(raw);
     const parts: string[] = [];
     if (data.slang_words?.length) {
@@ -123,7 +153,7 @@ function loadStyleProfile(): string {
 
 function loadLanguageExamples(): string {
   try {
-    const raw = fs.readFileSync(languageExamplesPath, 'utf-8');
+    const raw = cachedRead(languageExamplesPath);
     const data = JSON.parse(raw);
     const examples: any[] = data.examples || [];
     if (examples.length === 0) return '';
@@ -141,7 +171,7 @@ function loadLanguageExamples(): string {
 
 function loadContacts(): Record<string, any> {
   try {
-    const raw = fs.readFileSync(contactsPath, 'utf-8');
+    const raw = cachedRead(contactsPath);
     return JSON.parse(raw);
   } catch {
     return { contacts: {}, last_updated: new Date().toISOString() };
@@ -150,7 +180,7 @@ function loadContacts(): Record<string, any> {
 
 function loadScriptedReply(senderId: string): string {
   try {
-    const raw = fs.readFileSync(scriptedRepliesPath, 'utf-8');
+    const raw = cachedRead(scriptedRepliesPath);
     const data = JSON.parse(raw);
     const script = data[senderId];
     if (script && script.active && script.instruction) {
@@ -162,12 +192,13 @@ function loadScriptedReply(senderId: string): string {
 
 function markScriptReported(senderId: string) {
   try {
-    const raw = fs.readFileSync(scriptedRepliesPath, 'utf-8');
+    const raw = cachedRead(scriptedRepliesPath);
     const data = JSON.parse(raw);
     if (data[senderId]) {
       data[senderId].reported = true;
       data[senderId].lastReportedAt = new Date().toISOString();
       fs.writeFileSync(scriptedRepliesPath, JSON.stringify(data, null, 2));
+      invalidateCache(scriptedRepliesPath);
     }
   } catch { /* silent */ }
 }
@@ -182,6 +213,7 @@ function saveContact(senderId: string, info: any) {
   data.last_updated = new Date().toISOString();
   try {
     fs.writeFileSync(contactsPath, JSON.stringify(data, null, 2));
+    invalidateCache(contactsPath);
   } catch {
     // silent
   }
@@ -217,6 +249,7 @@ function buildSystemPrompt(
   history: any[],
   senderName?: string,
   relationshipInstruction?: string,
+  feedbackContext?: string,
 ): string {
   let prompt = `${instructions}\n\n`;
 
@@ -232,6 +265,11 @@ function buildSystemPrompt(
 
   if (relationshipInstruction) {
     prompt += `RELATIONSHIP NOTE:\n${relationshipInstruction}\n\n`;
+  }
+
+  // Feedback context — past mistakes to learn from
+  if (feedbackContext) {
+    prompt += `${feedbackContext}\n\n`;
   }
 
   // Style profile from chat analysis
@@ -645,7 +683,7 @@ function isSimpleMessage(userMessage: string): boolean {
   if (words.length === 0) return false;
 
   if (words.length === 1) {
-    const singlePatterns = [/^(hi|hello|hey|hlo|hii|hlw|helo|by|bye|byee|gn|goodnight|ok|okay|acha|haan|han|ha|nahi|nhi|na|ni|hmm|mm|hm|thanks|thank|thnx|lol|haha|hehe|oh|oy|aare|are|arey)$/];
+    const singlePatterns = [/^(hi|hello|hey|hlo|hii|hlw|helo|by|bye|byee|gn|goodnight|ok|okay|acha|haan|han|ha|nahi|nhi|na|ni|hmm|mm|hm|thanks|thank|thnx|lol|haha|hehe|oh|oy|aare|are|arey|assalamualaikum|walaikumassalam)$/];
     for (const p of singlePatterns) {
       if (p.test(words[0])) return true;
     }
@@ -653,7 +691,7 @@ function isSimpleMessage(userMessage: string): boolean {
   }
 
   if (words.length === 2) {
-    const twoWordPatterns = [/^(assalamualaikum|walaikumassalam)$/, /^(kit|ky)\s+(a|kar)$/];
+    const twoWordPatterns = [/^(kit|ky)\s+(a|kar)$/];
     const joined = words.join(' ');
     for (const p of twoWordPatterns) {
       if (p.test(joined)) return true;
@@ -743,6 +781,7 @@ export async function generateReply(
   const context = loadContext();
   const languageExamples = loadLanguageExamples();
   const styleProfile = loadStyleProfile();
+  const feedbackContext = getFeedbackContext();
   const contactsData = loadContacts();
   const contact = contactsData.contacts[id];
   const contactInfo = contact ? JSON.stringify(contact, null, 2) : '';
@@ -811,6 +850,7 @@ export async function generateReply(
     conversationHistory,
     senderName,
     relationshipInstruction,
+    feedbackContext,
   );
 
   // Append scripted reply injection if active
@@ -924,7 +964,7 @@ function isImportantMessage(text: string): boolean {
 
 function trackReply(senderId: string, reply: string) {
   const keys = Object.keys(recentReplies);
-  if (keys.length >= MAX_TRACKED_SENDERS && !recentReplies[senderId]) {
+  if (keys.length >= MAX_TRACKED_SENDERS) {
     delete recentReplies[keys[0]];
   }
 
@@ -1021,7 +1061,7 @@ interface ScheduledMessage {
 
 function loadSchedules(): ScheduledMessage[] {
   try {
-    return JSON.parse(fs.readFileSync(scheduledMessagesPath, 'utf-8'));
+    return JSON.parse(cachedRead(scheduledMessagesPath));
   } catch {
     return [];
   }
@@ -1029,6 +1069,7 @@ function loadSchedules(): ScheduledMessage[] {
 
 function saveSchedules(schedules: ScheduledMessage[]) {
   fs.writeFileSync(scheduledMessagesPath, JSON.stringify(schedules, null, 2));
+  invalidateCache(scheduledMessagesPath);
 }
 
 export function createSchedule(targetPhone: string, targetName: string, message: string, scheduledTime: string): ScheduledMessage {
@@ -1076,38 +1117,15 @@ export function markScheduleSent(id: string, error?: string) {
 }
 
 // ============================================================
-// OBSERVE MODE — Shared state + observation summary access
+// OBSERVATION SUMMARY ACCESS
 // ============================================================
-
-let _observeMode = false;
-let _observePhone: string | null = null;
-
-export function isObserveMode(): boolean {
-  return _observeMode;
-}
-
-export function getObservePhone(): string | null {
-  return _observePhone;
-}
-
-export function setObserveMode(on: boolean, phone?: string): string {
-  if (!on) {
-    _observeMode = false;
-    _observePhone = null;
-    return '🔍 Observe mode OFF.';
-  }
-  _observeMode = true;
-  _observePhone = phone || null;
-  return `🔍 Observe mode ON for ${_observePhone}. Mahir will watch & learn.`;
-}
 
 export function getObservedContext(phone: string): string {
   const parts: string[] = [];
 
   // 1) Per-contact observation summary
-  const contactsPath = path.join(dataDir, 'contacts.json');
   try {
-    const data = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
+    const data = JSON.parse(cachedRead(contactsPath));
     const contact = data.contacts[phone];
     if (contact?.observation_summary) {
       parts.push(contact.observation_summary);
@@ -1117,7 +1135,7 @@ export function getObservedContext(phone: string): string {
   // 2) Global learned knowledge (from all observed conversations)
   const learnPath = path.join(dataDir, 'learned_knowledge.json');
   try {
-    const knowledge = JSON.parse(fs.readFileSync(learnPath, 'utf-8'));
+    const knowledge = JSON.parse(cachedRead(learnPath));
     if (Array.isArray(knowledge) && knowledge.length > 0) {
       const categories = [...new Set(knowledge.map((k: any) => k.category))];
       parts.push('GLOBAL KNOWLEDGE (facts observed from other conversations — use with awareness):');
@@ -1131,7 +1149,7 @@ export function getObservedContext(phone: string): string {
   // 3) Global language patterns (from all observed conversations)
   const langPath = path.join(dataDir, 'learned_language.json');
   try {
-    const lang = JSON.parse(fs.readFileSync(langPath, 'utf-8'));
+    const lang = JSON.parse(cachedRead(langPath));
     if (lang.patterns) {
       parts.push('GLOBAL LANGUAGE PATTERNS (learned from observing conversations — adapt to each person):');
       if (lang.patterns.language_mix) parts.push(`  Language style: ${lang.patterns.language_mix}.`);
