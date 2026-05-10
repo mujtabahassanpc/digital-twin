@@ -2,8 +2,6 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  WASocket,
-  PresenceData,
   downloadContentFromMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
@@ -231,8 +229,4 @@ export function getQRCode() {
 
 export function isConnected() {
   return isReady;
-}
-
-export function getReconnectAttempts() {
-  return reconnectAttempts;
 }

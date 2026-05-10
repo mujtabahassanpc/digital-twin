@@ -153,6 +153,7 @@ function buildSystemPrompt(
   timeContext: string,
   history: any[],
   senderName?: string,
+  relationshipInstruction?: string,
 ): string {
   let prompt = `${instructions}\n\n`;
 
@@ -164,6 +165,10 @@ function buildSystemPrompt(
   // Contact memory (what Mahir knows about this person)
   if (contactInfo) {
     prompt += `WHAT YOU KNOW ABOUT THIS PERSON:\n${contactInfo}\n\n`;
+  }
+
+  if (relationshipInstruction) {
+    prompt += `RELATIONSHIP NOTE:\n${relationshipInstruction}\n\n`;
   }
 
   // Language examples taught via /teach
@@ -670,7 +675,30 @@ export async function generateReply(
   const context = loadContext();
   const languageExamples = loadLanguageExamples();
   const contactsData = loadContacts();
-  const contactInfo = contactsData.contacts[id] ? JSON.stringify(contactsData.contacts[id], null, 2) : '';
+  const contact = contactsData.contacts[id];
+  const contactInfo = contact ? JSON.stringify(contact, null, 2) : '';
+
+  // Relationship-based tone instruction
+  const rel = contact?.relationship || '';
+  const behaviorMap: Record<string, string> = {
+    mom: 'Use respectful, loving language. Address with "aap".',
+    dad: 'Use formal, respectful language. Address with "aap".',
+    bibi: 'Use warm, loving, casual language.',
+    wife: 'Use warm, loving, casual language.',
+    friend: 'Use casual, playful language. Can use "tum".',
+    boss: 'Use very formal, professional language.',
+    bhai: 'Use casual, brotherly, warm language.',
+    brother: 'Use casual, brotherly, warm language.',
+    didi: 'Use respectful, loving language. Address with "aap".',
+    sister: 'Use respectful, loving language. Address with "aap".',
+    elder: 'Use very respectful, formal language. Address with "aap".',
+    stranger: 'Use polite but cautious, formal language.',
+    client: 'Use professional, polite, helpful language.',
+    teacher: 'Use very respectful, formal language. Address with "aap".',
+  };
+  const relationshipInstruction = rel && behaviorMap[rel]
+    ? `This person is your ${rel}. ${behaviorMap[rel]}`
+    : '';
 
   // Scripted reply injection (special override feature)
   const scriptInstruction = loadScriptedReply(id);
@@ -688,6 +716,7 @@ export async function generateReply(
     timeContext,
     conversationHistory,
     senderName,
+    relationshipInstruction,
   );
 
   // Append scripted reply injection if active
@@ -810,6 +839,7 @@ function trackReply(senderId: string, reply: string) {
 
 export interface ProviderStatus {
   name: string;
+  available: boolean;
   onCooldown: boolean;
   cooldownRemaining: number;
 }
@@ -868,4 +898,4 @@ export async function generateSpeech(text: string): Promise<Buffer | null> {
   }
 }
 
-export { loadContext, saveContact, markScriptReported };
+export { markScriptReported };

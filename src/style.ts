@@ -129,7 +129,7 @@ function analyzeStyle(messages: ChatMessage[], userName: string = 'Mujtaba') {
 }
 
 // Run if called directly (not when imported)
-const isMainModule = import.meta.url === `file://${process.argv[1]}`.replace(/\\/g, '/');
+const isMainModule = import.meta.url === `file:///${process.argv[1]}`.replace(/\\/g, '/');
 if (isMainModule && process.argv[2]) {
   const filePath = process.argv[2];
   const userName = process.argv[3] || 'Mujtaba';
@@ -143,4 +143,4 @@ if (isMainModule && process.argv[2]) {
   analyzeStyle(messages, userName);
 }
 
-export { parseWhatsAppExport, analyzeStyle };
+

@@ -1,5 +1,5 @@
 import { config } from './config.js';
-import { getConversationHistory, getPool } from './db.js';
+import { getPool } from './db.js';
 import fs from 'fs';
 import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -88,6 +88,37 @@ ${highlights}
 — Mahir Abher 🤖`;
 
   return sendTelegramMessage(message);
+}
+
+export async function getDigestStats() {
+  const pool = getPool();
+  const today = new Date().toISOString().split('T')[0];
+  const totalResult = await pool.query(`SELECT COUNT(*) FROM conversations WHERE DATE(timestamp) = $1`, [today]);
+  const totalMessages = parseInt(totalResult.rows[0].count);
+  const contactsResult = await pool.query(
+    `SELECT sender_name, COUNT(*) as count FROM conversations WHERE DATE(timestamp) = $1 GROUP BY sender_name ORDER BY count DESC LIMIT 5`,
+    [today]
+  );
+  const topContacts = contactsResult.rows.map((r: any) => ({
+    name: r.sender_name || 'Unknown',
+    count: parseInt(r.count),
+  }));
+  const importantResult = await pool.query(
+    `SELECT sender_name, content FROM conversations WHERE DATE(timestamp) = $1 AND LENGTH(content) > 50 AND message_type = 'incoming' ORDER BY timestamp DESC LIMIT 5`,
+    [today]
+  );
+  const importantHighlights = importantResult.rows.map(
+    (r: any) => `${r.sender_name || 'Unknown'}: ${r.content.substring(0, 100)}`
+  );
+  return {
+    totalMessages,
+    uniqueContacts: topContacts.length,
+    topContacts,
+    importantHighlights,
+    date: new Date().toLocaleDateString('en-IN', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    }),
+  };
 }
 
 export async function sendInstantAlert(
@@ -312,23 +343,10 @@ export async function handleTelegramCommand(command: string, args: string): Prom
       return sendManualReply(targetNumber, replyMessage);
 
     case 'digest':
-      const { sendDailyDigest } = await import('./telegram.js');
       try {
-        const pool = getPool();
-        const today = new Date().toISOString().split('T')[0];
-        const totalResult = await pool.query(`SELECT COUNT(*) FROM conversations WHERE DATE(timestamp) = $1`, [today]);
-        const contactsResult = await pool.query(`SELECT sender_name, COUNT(*) as count FROM conversations WHERE DATE(timestamp) = $1 GROUP BY sender_name ORDER BY count DESC LIMIT 5`, [today]);
-        const importantResult = await pool.query(`SELECT sender_name, content FROM conversations WHERE DATE(timestamp) = $1 AND LENGTH(content) > 50 AND message_type = 'incoming' ORDER BY timestamp DESC LIMIT 5`, [today]);
-        // Don't close pool — using singleton
-
-        return sendDailyDigest({
-          totalMessages: parseInt(totalResult.rows[0].count),
-          uniqueContacts: contactsResult.rows.length,
-          topContacts: contactsResult.rows.map((r: any) => ({ name: r.sender_name || 'Unknown', count: parseInt(r.count) })),
-          importantHighlights: importantResult.rows.map((r: any) => `${r.sender_name || 'Unknown'}: ${r.content.substring(0, 100)}`),
-          date: new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }),
-        });
-      } catch (error) {
+        const stats = await getDigestStats();
+        return sendDailyDigest(stats);
+      } catch {
         return sendTelegramMessage('❌ Failed to generate digest');
       }
 
@@ -400,28 +418,6 @@ export async function handleTelegramCommand(command: string, args: string): Prom
         return sendTelegramMessage(`✅ Context updated:\n\n"${args}"`);
       } catch {
         return sendTelegramMessage('❌ Failed to update context');
-      }
-    }
-
-    case 'contacts': {
-      try {
-        const data = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
-        const contacts = Object.entries(data.contacts || {});
-        if (contacts.length === 0) {
-          return sendTelegramMessage('📋 Koi saved contact nahi hai abhi');
-        }
-
-        const list = contacts.slice(-10).map(([id, info]: [string, any]) => {
-          const name = info.name || 'Unknown';
-          const topic = info.last_topic || 'N/A';
-          const count = info.conversation_count || 0;
-          const last = info.last_message_summary || '';
-          return `• *${name}* (${id})\n  Topic: ${topic} | Chats: ${count}\n  Last: "${last.substring(0, 50)}..."`;
-        }).join('\n\n');
-
-        return sendTelegramMessage(`📋 *Saved Contacts:* (${contacts.length} total)\n\n${list}`);
-      } catch {
-        return sendTelegramMessage('📋 Contacts file not found');
       }
     }
 

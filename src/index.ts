@@ -5,7 +5,7 @@ import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { initDatabase, getPool, closePool } from './db.js';
-import { generateReply, getProviderStatuses, isAnyProviderAvailable, getDbCreditsUsed, resetDbCredits } from './ai.js';
+import { generateReply, getProviderStatuses, isAnyProviderAvailable, getDbCreditsUsed, incrementDbCredits, resetDbCredits } from './ai.js';
 import { saveMessage, getConversationHistory } from './db.js';
 import { startWhatsApp, sendWhatsAppMessage, showTyping, sendVoiceMessage, getQRCode, isConnected, whatsappEmitter } from './whatsapp.js';
 import { sendInstantAlert, sendImportantConversationAlert, handleTelegramCommand } from './telegram.js';
@@ -53,6 +53,7 @@ function processBatchedMessage(
     try {
       // Save incoming message (combined)
       await saveMessage(senderId, senderName, 'incoming', combinedText, false);
+      incrementDbCredits();
 
       const lower = combinedText.toLowerCase();
 
