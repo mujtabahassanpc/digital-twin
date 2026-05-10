@@ -249,7 +249,7 @@ export async function handleTelegramCommand(command: string, args: string): Prom
       return sendTelegramMessage(`🤖 <b>Mahir Abher — Commands</b>
 
 <b>🔧 Status:</b>
-<b>/status</b> — Check all services
+<b>/status</b> — Check all services + provider health
 <b>/busy on</b> — Enable auto-reply
 <b>/busy off</b> — Disable auto-reply
 <b>/digest</b> — Send today's summary
@@ -269,8 +269,16 @@ export async function handleTelegramCommand(command: string, args: string): Prom
 <b>/contacts</b> — View saved contact memories
 <b>/forget [senderId]</b> — Clear contact memory for a person
 
+<b>🎭 Scripted Replies:</b>
+<b>/script [phone] [instruction]</b> — Set a scripted reply for a person (Mahir will naturally say it)
+<b>/scriptlist</b> — List all active scripted replies
+<b>/scriptdel [phone]</b> — Remove a scripted reply
+
+<b>🔗 Relationship:</b>
+<b>/relation [phone] [type]</b> — Set relationship (mom/dad/bibi/friend/boss/bhai/didi/elder/stranger)
+
 <b>💬 Reply:</b>
-<b>/reply [number] [msg]</b> — Send manual reply
+<b>/reply [number] [msg]</b> — Send manual WhatsApp reply
 
 <b>/help</b> — Show this message
 
