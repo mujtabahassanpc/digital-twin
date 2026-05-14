@@ -451,21 +451,29 @@ export async function handleTelegramCommand(command: string, args: string): Prom
         return sendTelegramMessage('Message aur reason dono chahiye.\nUsage: /teach "message" | reason');
       }
 
-      try {
-        const data = JSON.parse(fs.readFileSync(languageExamplesPath, 'utf-8'));
-        data.examples.push({
-          message,
-          reason,
-          added_at: new Date().toISOString(),
-        });
-        data.last_updated = new Date().toISOString();
-        fs.writeFileSync(languageExamplesPath, JSON.stringify(data, null, 2));
+      const data = loadLanguageExamples();
+      data.examples.push({
+        message,
+        reason,
+        added_at: new Date().toISOString(),
+      });
+      data.last_updated = new Date().toISOString();
+      fs.writeFileSync(languageExamplesPath, JSON.stringify(data, null, 2));
 
-        return sendTelegramMessage(`✅ Language example added (#${data.examples.length}):\n\n💬 Message: "${message}"\n📝 Reason: ${reason}\n\nMahir ab ye example use karega.`);
-      } catch (err: any) {
-        return sendTelegramMessage(`❌ Failed to add example: ${err.message}`);
-      }
+      return sendTelegramMessage(`✅ Language example added (#${data.examples.length}):\n\n💬 Message: "${message}"\n📝 Reason: ${reason}\n\nMahir ab ye example use karega.`);
     }
+
+function loadLanguageExamples(): { examples: any[]; last_updated: string } {
+  try {
+    return JSON.parse(fs.readFileSync(languageExamplesPath, 'utf-8'));
+  } catch {
+    const defaultData = { examples: [], last_updated: new Date().toISOString() };
+    try {
+      fs.writeFileSync(languageExamplesPath, JSON.stringify(defaultData, null, 2));
+    } catch { /* silent */ }
+    return defaultData;
+  }
+}
 
     case 'teachbulk': {
       // Format: /teachbulk "msg1" > reason1 :: "msg2" > reason2
@@ -496,74 +504,59 @@ export async function handleTelegramCommand(command: string, args: string): Prom
         return sendTelegramMessage('Koi valid example nahi mili. Format: "msg" > reason :: "msg2" > reason2');
       }
 
-      try {
-        const data = JSON.parse(fs.readFileSync(languageExamplesPath, 'utf-8'));
-        for (const ex of newExamples) {
-          data.examples.push(ex);
-        }
-        data.last_updated = new Date().toISOString();
-        fs.writeFileSync(languageExamplesPath, JSON.stringify(data, null, 2));
-
-        const list = newExamples.map((ex, i) => `${i + 1}. "${ex.message}" — ${ex.reason}`).join('\n');
-        return sendTelegramMessage(`✅ ${newExamples.length} examples added (total: ${data.examples.length}):\n\n${list}`);
-      } catch (err: any) {
-        return sendTelegramMessage(`❌ Failed to add examples: ${err.message}`);
+      const data = loadLanguageExamples();
+      for (const ex of newExamples) {
+        data.examples.push(ex);
       }
+      data.last_updated = new Date().toISOString();
+      fs.writeFileSync(languageExamplesPath, JSON.stringify(data, null, 2));
+
+      const list = newExamples.map((ex, i) => `${i + 1}. "${ex.message}" — ${ex.reason}`).join('\n');
+      return sendTelegramMessage(`✅ ${newExamples.length} examples added (total: ${data.examples.length}):\n\n${list}`);
     }
 
     case 'lang': {
       const limit = parseInt(args) || 10;
-      try {
-        const data = JSON.parse(fs.readFileSync(languageExamplesPath, 'utf-8'));
-        const examples = data.examples || [];
+      const data = loadLanguageExamples();
+      const examples = data.examples || [];
 
-        if (examples.length === 0) {
-          return sendTelegramMessage('📋 Koi language example nahi hai abhi.\n\nUse /teach "message" | reason to add.');
-        }
-
-        const recent = examples.slice(-limit);
-        const list = recent.map((ex: any, i: number) => {
-          const globalIndex = examples.length - limit + i + 1;
-          return `*#${globalIndex}* "${ex.message}"\n   → ${ex.reason}`;
-        }).join('\n\n');
-
-        return sendTelegramMessage(`📋 *Language Examples* (${examples.length} total, showing last ${limit}):\n\n${list}`);
-      } catch {
-        return sendTelegramMessage('📋 Language examples file not found');
+      if (examples.length === 0) {
+        return sendTelegramMessage('📋 Koi language example nahi hai abhi.\n\nUse /teach "message" | reason to add.');
       }
+
+      const recent = examples.slice(-limit);
+      const list = recent.map((ex: any, i: number) => {
+        const globalIndex = examples.length - limit + i + 1;
+        return `*#${globalIndex}* "${ex.message}"\n   → ${ex.reason}`;
+      }).join('\n\n');
+
+      return sendTelegramMessage(`📋 *Language Examples* (${examples.length} total, showing last ${limit}):\n\n${list}`);
     }
 
     case 'forgetlang': {
-      const index = parseInt(args) - 1; // 1-based index
+      const index = parseInt(args) - 1;
       if (isNaN(index)) {
         return sendTelegramMessage('Usage: /forgetlang <index>\n\nUse /lang to see indices.');
       }
 
-      try {
-        const data = JSON.parse(fs.readFileSync(languageExamplesPath, 'utf-8'));
-        const examples = data.examples || [];
+      const data = loadLanguageExamples();
+      const examples = data.examples || [];
 
-        if (index < 0 || index >= examples.length) {
-          return sendTelegramMessage(`❌ Index ${index + 1} out of range. Total: ${examples.length}`);
-        }
-
-        const removed = examples.splice(index, 1)[0];
-        data.last_updated = new Date().toISOString();
-        fs.writeFileSync(languageExamplesPath, JSON.stringify(data, null, 2));
-
-        return sendTelegramMessage(`✅ Removed example:\n\n"${removed.message}" → ${removed.reason}`);
-      } catch {
-        return sendTelegramMessage('❌ Failed to remove example');
+      if (index < 0 || index >= examples.length) {
+        return sendTelegramMessage(`❌ Index ${index + 1} out of range. Total: ${examples.length}`);
       }
+
+      const removed = examples.splice(index, 1)[0];
+      data.last_updated = new Date().toISOString();
+      fs.writeFileSync(languageExamplesPath, JSON.stringify(data, null, 2));
+
+      return sendTelegramMessage(`✅ Removed example:\n\n"${removed.message}" → ${removed.reason}`);
     }
 
     case 'clearlang': {
-      try {
-        fs.writeFileSync(languageExamplesPath, JSON.stringify({ examples: [], last_updated: new Date().toISOString() }, null, 2));
-        return sendTelegramMessage('✅ All language examples cleared.');
-      } catch {
-        return sendTelegramMessage('❌ Failed to clear examples');
-      }
+      loadLanguageExamples();
+      fs.writeFileSync(languageExamplesPath, JSON.stringify({ examples: [], last_updated: new Date().toISOString() }, null, 2));
+      return sendTelegramMessage('✅ All language examples cleared.');
     }
 
     case 'review': {
