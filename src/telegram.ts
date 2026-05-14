@@ -383,7 +383,7 @@ export async function handleTelegramCommand(command: string, args: string): Prom
       if (!args.trim()) {
         try {
           const current = fs.readFileSync(contextPath, 'utf-8');
-          return sendTelegramMessage(`📋 <b>Current Global Context:</b>\n\n<code>${current.substring(0, 1500).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</code>\n\n— Mahir har message me ye context follow karta hai GLOBALLY. /mujtaba se status update karo, ya /context <instruction> se naya instruction add karo.`);
+          return sendTelegramMessage(`📋 <b>Current Global Context:</b>\n\n<code>${current.substring(0, 1500).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</code>\n\n— Mahir har message me ye context follow karta hai GLOBALLY. /mujtaba se status update karo, ya /context &lt;instruction&gt; se naya instruction add karo.`);
         } catch {
           return sendTelegramMessage('📋 Context file not found');
         }
