@@ -258,6 +258,9 @@ export async function handleTelegramCommand(command: string, args: string): Prom
 <b>/contacts</b> — View recent contacts (from DB)
 <b>/contactmem</b> — View saved contact memories (with relationships)
 <b>/forget [senderId]</b> — Clear contact memory for a person
+<b>/confirmname [phone] [name] [relation]</b> — Confirm a name Mahir learned, set relationship
+<b>/rejectname [phone]</b> — Reject a learned name, Mahir will ask again
+<b>/nameguide [phone] [guide]</b> — Give Mahir a guide on how to talk to this person
 
 <b>🎭 Scripted Replies:</b>
 <b>/script [phone] [instruction]</b> — Set a scripted reply for a person (Mahir will naturally say it)
@@ -579,6 +582,52 @@ function loadLanguageExamples(): { examples: any[]; last_updated: string } {
       } catch {
         return sendTelegramMessage('❌ Failed to read learning queue');
       }
+    }
+
+    case 'confirmname': {
+      const cnParts = args.split(' ');
+      if (cnParts.length < 3) {
+        return sendTelegramMessage('Usage: /confirmname <phone> <name> <relation>\n\nConfirms a name Mahir learned. Relation: friend, mom, dad, bibi, bhai, didi, boss, elder, stranger, client, teacher');
+      }
+      const cnPhone = cnParts[0];
+      const cnName = cnParts[1];
+      const cnRelation = cnParts[2];
+      const { loadContacts, saveContact } = await import('./ai.js');
+      const contacts = loadContacts();
+      if (!contacts.contacts[cnPhone]) {
+        contacts.contacts[cnPhone] = { conversation_count: 0 };
+      }
+      contacts.contacts[cnPhone].name = cnName;
+      contacts.contacts[cnPhone].name_confirmed = true;
+      contacts.contacts[cnPhone].name_pending_confirmation = false;
+      contacts.contacts[cnPhone].relationship = cnRelation;
+      saveContact(cnPhone, contacts.contacts[cnPhone]);
+      return sendTelegramMessage(`✅ Confirmed: <b>${cnName}</b> (${cnPhone}) as <b>${cnRelation}</b>.\n\nMahir ab is naam se puchega aur ${cnRelation} ki tarah behave karega.\n\nOptional: /nameguide ${cnPhone} <guide> — batao ki isse kaise baat kare`);
+    }
+
+    case 'rejectname': {
+      const rnPhone = args.trim();
+      if (!rnPhone) {
+        return sendTelegramMessage('Usage: /rejectname <phone>\n\nRejects the name Mahir learned for this person.');
+      }
+      const { saveContact } = await import('./ai.js');
+      saveContact(rnPhone, { name_pending_confirmation: false, name: '' });
+      return sendTelegramMessage(`❌ Name rejected for ${rnPhone}. Mahir dobara puchega.`);
+    }
+
+    case 'nameguide': {
+      const ngSpaceIdx = args.indexOf(' ');
+      if (ngSpaceIdx === -1) {
+        return sendTelegramMessage('Usage: /nameguide <phone> <guide>\n\nExample: /nameguide 91987654321 "ye mera college friend hai, casually baat kar"\n\nMahir is guide ko use karega us insaan se baat karte waqt.');
+      }
+      const ngPhone = args.substring(0, ngSpaceIdx).trim();
+      const ngGuide = args.substring(ngSpaceIdx + 1).trim();
+      if (!ngPhone || !ngGuide) {
+        return sendTelegramMessage('❌ Phone or guide missing.\nUsage: /nameguide <phone> <guide>');
+      }
+      const { saveContact } = await import('./ai.js');
+      saveContact(ngPhone, { guide: ngGuide });
+      return sendTelegramMessage(`✅ Guide saved for ${ngPhone}:\n\n"${ngGuide}"\n\nMahir ab is guide ko follow karega us se baat karte waqt.`);
     }
 
     case 'script': {

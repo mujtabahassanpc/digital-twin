@@ -499,6 +499,14 @@ function processBatchedMessage(
         addAlert('inform_promise', senderName, senderId, combinedText, `Mahir replied: "${result.text.slice(0, 150)}"`);
       }
 
+      // --- Name learned → ask Mujtaba for confirmation ---
+      if (result.nameLearned) {
+        addAlert('name_learned', result.nameLearned.name, result.nameLearned.phone,
+          `Mahir learned a new name: "${result.nameLearned.name}" (${result.nameLearned.phone})`,
+          `Use /confirmname ${result.nameLearned.phone} <name> <relation> to confirm.\nUse /rejectname ${result.nameLearned.phone} to reject.\n\nThen /nameguide ${result.nameLearned.phone} <guide> to tell Mahir how to talk to them.`
+        );
+      }
+
       // --- Voice Reply — user asked Mahir to send voice ---
       const userWantsVoice = voiceKeywords.some(kw => lower.includes(kw));
       if (userWantsVoice && config.getSarvamKeys().length > 0) {

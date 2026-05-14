@@ -723,9 +723,10 @@ export interface GenerateReplyResult {
   clarificationText: string;
   scriptTriggered?: string;
   hasInformPromise?: boolean;
+  nameLearned?: { name: string; phone: string };
 }
 
-function makeResult(text: string, metadata?: Partial<ReplyMetadata>, clarification?: { needsClarification: boolean; text: string }, extras?: { scriptTriggered?: string; hasInformPromise?: boolean }): GenerateReplyResult {
+function makeResult(text: string, metadata?: Partial<ReplyMetadata>, clarification?: { needsClarification: boolean; text: string }, extras?: { scriptTriggered?: string; hasInformPromise?: boolean; nameLearned?: { name: string; phone: string } }): GenerateReplyResult {
   return {
     text,
     metadata: {
@@ -736,6 +737,7 @@ function makeResult(text: string, metadata?: Partial<ReplyMetadata>, clarificati
     clarificationText: clarification?.text ?? '',
     scriptTriggered: extras?.scriptTriggered,
     hasInformPromise: extras?.hasInformPromise,
+    nameLearned: extras?.nameLearned,
   };
 }
 
@@ -797,7 +799,16 @@ export async function generateReply(
     if (contact.last_topic) parts.push(`last topic was about ${contact.last_topic}`);
     if (contact.last_message_summary) parts.push(`last message: "${contact.last_message_summary.slice(0, 80)}"`);
     if (contact.last_reply_summary) parts.push(`you replied: "${contact.last_reply_summary.slice(0, 80)}"`);
-    if (contact.name) parts.push(`their name is ${contact.name} — use it naturally in conversation`);
+    if (contact.name) {
+      if (contact.name_confirmed) {
+        parts.push(`their CONFIRMED name is ${contact.name} — call them by this name`);
+      } else if (contact.name_pending_confirmation) {
+        parts.push(`their name might be ${contact.name} — waiting for Mujtaba to confirm`);
+      } else {
+        parts.push(`their name is ${contact.name} — use it naturally in conversation`);
+      }
+    }
+    if (contact.guide) parts.push(`Mujtaba's guide about them: "${contact.guide}"`);
     if (contact.conversation_count) parts.push(`you've talked ${contact.conversation_count} times before`);
     if (parts.length > 0) contactSummary = `📌 Contact Summary: ${parts.join('. ')}.`;
   }
@@ -878,12 +889,13 @@ export async function generateReply(
         if (cleaned.length > 0) {
           trackReply(id, cleaned);
           recordOutgoing(id, cleaned);
-          learnFromConversation(id, senderName, senderMessage, cleaned, conversationHistory);
+          const newName = learnFromConversation(id, senderName, senderMessage, cleaned, conversationHistory);
+          const nameLearned = newName ? { name: newName, phone: id } : undefined;
 
           console.log(`✅ ${provider.name}: ${cleaned.slice(0, 60)}...`);
           recordProviderSuccess(provider.name);
           const hasInform = /(acha bolbo|bol dunga|ko bol|inform|tell|bata dunga|puchke bat|pore bol|Mujtaba ko)/i.test(cleaned);
-          return makeResult(cleaned, {}, undefined, { scriptTriggered: scriptInstruction, hasInformPromise: hasInform });
+          return makeResult(cleaned, {}, undefined, { scriptTriggered: scriptInstruction, hasInformPromise: hasInform, nameLearned });
         }
       }
     } catch (err: any) {
@@ -913,11 +925,14 @@ function learnFromConversation(
   userMessage: string,
   aiReply: string,
   history: any[]
-) {
+): string | undefined {
   const existing = loadContacts().contacts[senderId] || {};
+  let learnedName: string | undefined;
 
   if (senderName && !existing.name) {
     existing.name = senderName;
+    existing.name_pending_confirmation = true;
+    learnedName = senderName;
   }
 
   existing.conversation_count = (existing.conversation_count || 0) + 1;
@@ -937,6 +952,7 @@ function learnFromConversation(
   existing.last_reply_summary = aiReply.slice(0, 100);
 
   saveContact(senderId, existing);
+  return learnedName;
 }
 
 // ============================================================
@@ -1170,4 +1186,4 @@ export function getObservedContext(phone: string): string {
   return parts.join('\n\n');
 }
 
-export { loadContext, saveContact, markScriptReported };
+export { loadContext, loadContacts, saveContact, markScriptReported };

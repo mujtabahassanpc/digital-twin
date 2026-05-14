@@ -1,7 +1,7 @@
 import { sendTelegramMessage } from './telegram.js';
 
 interface AlertEntry {
-  type: 'confusion' | 'inform_promise' | 'script_executed' | 'important_conversation';
+  type: 'confusion' | 'inform_promise' | 'script_executed' | 'important_conversation' | 'name_learned' | 'name_confirmed';
   senderName: string;
   senderId: string;
   content: string;
@@ -48,11 +48,13 @@ export function flushAlerts(reason = '📋 Manual flush'): string {
   let scriptCount = 0;
   const contactSet = new Set<string>();
 
+  let nameLearnCount = 0;
   for (const a of buffer) {
     contactSet.add(a.senderName);
     if (a.type === 'inform_promise') informCount++;
     else if (a.type === 'confusion') confusionCount++;
     else if (a.type === 'script_executed') scriptCount++;
+    else if (a.type === 'name_learned') nameLearnCount++;
   }
 
   const sorted = [...buffer].sort((a, b) => a.timestamp - b.timestamp);
@@ -61,13 +63,15 @@ export function flushAlerts(reason = '📋 Manual flush'): string {
     if (!groups[a.senderId]) groups[a.senderId] = { name: a.senderName, items: [] };
     const label = a.type === 'inform_promise' ? '📢 "Bol dunga"' :
       a.type === 'confusion' ? '🤔 Confused' :
-      a.type === 'script_executed' ? '📋 Script ran' : '🔔 Important';
+      a.type === 'script_executed' ? '📋 Script ran' :
+      a.type === 'name_learned' ? '📝 New name learned' :
+      a.type === 'name_confirmed' ? '✅ Name confirmed' : '🔔 Important';
     const time = new Date(a.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
     groups[a.senderId].items.push(`[${time}] ${label}: ${a.content.slice(0, 100)}`);
   }
 
   let summary = `📋 <b>Mahir Activity Digest</b>\n${reason}\n\n`;
-  summary += `<b>Stats:</b> ${buffer.length} events · ${contactSet.size} contacts · ${informCount} inform · ${confusionCount} confused · ${scriptCount} scripts\n\n`;
+  summary += `<b>Stats:</b> ${buffer.length} events · ${contactSet.size} contacts · ${informCount} inform · ${confusionCount} confused · ${scriptCount} scripts · ${nameLearnCount} names learned\n\n`;
   for (const [id, g] of Object.entries(groups)) {
     summary += `<b>${g.name}</b> (${g.items.length}x)\n`;
     for (const item of g.items.slice(-5)) summary += `  ${item}\n`;
