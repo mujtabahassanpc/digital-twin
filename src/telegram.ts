@@ -261,6 +261,8 @@ export async function handleTelegramCommand(command: string, args: string): Prom
 <b>/confirmname [phone] [name] [relation]</b> — Confirm a name Mahir learned, set relationship
 <b>/rejectname [phone]</b> — Reject a learned name, Mahir will ask again
 <b>/nameguide [phone] [guide]</b> — Give Mahir a guide on how to talk to this person
+<b>/savednames</b> — View all contacts with names, guides, and confirmation status
+<b>/deletename [phone]</b> — Delete a saved name & guide, Mahir will ask again
 
 <b>🎭 Scripted Replies:</b>
 <b>/script [phone] [instruction]</b> — Set a scripted reply for a person (Mahir will naturally say it)
@@ -381,7 +383,7 @@ export async function handleTelegramCommand(command: string, args: string): Prom
       if (!args.trim()) {
         try {
           const current = fs.readFileSync(contextPath, 'utf-8');
-          return sendTelegramMessage(`📋 *Current Context:*\n\n\`\`\`\n${current.substring(0, 1000)}\n\`\`\``);
+          return sendTelegramMessage(`📋 <b>Current Global Context:</b>\n\n<code>${current.substring(0, 1500).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</code>\n\n— Mahir har message me ye context follow karta hai GLOBALLY. /mujtaba se status update karo, ya /context <instruction> se naya instruction add karo.`);
         } catch {
           return sendTelegramMessage('📋 Context file not found');
         }
@@ -389,12 +391,20 @@ export async function handleTelegramCommand(command: string, args: string): Prom
 
       try {
         const current = fs.readFileSync(contextPath, 'utf-8');
-        const updated = current.replace(
-          /(## Special Instructions for Specific Contacts\n).*/,
-          `$1\n- ${args}\n\n_Last updated: ${new Date().toISOString()}_\n`
-        );
-        fs.writeFileSync(contextPath, updated, 'utf-8');
-        return sendTelegramMessage(`✅ Context updated:\n\n"${args}"`);
+        // Check if Special Instructions section exists
+        if (current.includes('## Special Instructions for Specific Contacts')) {
+          const updated = current.replace(
+            /## Special Instructions for Specific Contacts[\s\S]*?(?=\n## |$)/,
+            `## Special Instructions for Specific Contacts\n- ${args}\n\n_Last updated: ${new Date().toISOString()}_`
+          );
+          fs.writeFileSync(contextPath, updated, 'utf-8');
+        } else {
+          // Append section if missing
+          const updated = current.trim() + `\n\n## Special Instructions for Specific Contacts\n- ${args}\n\n_Last updated: ${new Date().toISOString()}_\n`;
+          fs.writeFileSync(contextPath, updated, 'utf-8');
+        }
+        const newContext = fs.readFileSync(contextPath, 'utf-8');
+        return sendTelegramMessage(`✅ <b>Context Updated (GLOBAL)</b>\n\nNew instruction added. Ab Mahir har conversation me ye follow karega.\n\n<b>Current Context:</b>\n<code>${newContext.substring(0, 1500).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</code>`);
       } catch {
         return sendTelegramMessage('❌ Failed to update context');
       }
@@ -628,6 +638,36 @@ function loadLanguageExamples(): { examples: any[]; last_updated: string } {
       const { saveContact } = await import('./ai.js');
       saveContact(ngPhone, { guide: ngGuide });
       return sendTelegramMessage(`✅ Guide saved for ${ngPhone}:\n\n"${ngGuide}"\n\nMahir ab is guide ko follow karega us se baat karte waqt.`);
+    }
+
+    case 'savednames': {
+      const { loadContacts } = await import('./ai.js');
+      const data = loadContacts();
+      const entries = Object.entries(data.contacts || {}) as [string, any][];
+      if (entries.length === 0) {
+        return sendTelegramMessage('📋 Koi saved contact nahi hai.');
+      }
+      let text = '📋 <b>Saved Contacts — Names</b>\n\n';
+      for (const [phone, info] of entries.slice(-20)) {
+        const name = info.name || '—';
+        const status = info.name_confirmed ? '✅ Confirmed' :
+          info.name_pending_confirmation ? '⏳ Pending' : '❓ Unknown';
+        const rel = info.relationship || '—';
+        const guide = info.guide ? `\n     📝 Guide: "${info.guide.slice(0, 60)}"` : '';
+        text += `<b>${name}</b> (${phone}) — ${status} · ${rel}${guide}\n`;
+      }
+      text += '\nUse /confirmname, /rejectname, /nameguide, or /deletename to manage.';
+      return sendTelegramMessage(text);
+    }
+
+    case 'deletename': {
+      const dnPhone = args.trim();
+      if (!dnPhone) {
+        return sendTelegramMessage('Usage: /deletename <phone>\n\nDeletes the saved name for this contact. Mahir will ask again.');
+      }
+      const { saveContact } = await import('./ai.js');
+      saveContact(dnPhone, { name: '', name_confirmed: false, name_pending_confirmation: false, relationship: '', guide: '' });
+      return sendTelegramMessage(`🗑️ Name & guide deleted for ${dnPhone}. Mahir dobara puchega.`);
     }
 
     case 'script': {

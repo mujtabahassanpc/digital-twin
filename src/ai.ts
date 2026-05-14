@@ -801,11 +801,11 @@ export async function generateReply(
     if (contact.last_reply_summary) parts.push(`you replied: "${contact.last_reply_summary.slice(0, 80)}"`);
     if (contact.name) {
       if (contact.name_confirmed) {
-        parts.push(`their CONFIRMED name is ${contact.name} — call them by this name`);
+        parts.push(`their CONFIRMED name is ${contact.name} — call them by this name ALWAYS. Mujtaba ne bataya hai.`);
       } else if (contact.name_pending_confirmation) {
-        parts.push(`their name might be ${contact.name} — waiting for Mujtaba to confirm`);
+        parts.push(`WhatsApp name: ${contact.name} (not yet confirmed) — ASK them for their real name to be sure`);
       } else {
-        parts.push(`their name is ${contact.name} — use it naturally in conversation`);
+        parts.push(`their name might be ${contact.name} — ASK them for their name to confirm`);
       }
     }
     if (contact.guide) parts.push(`Mujtaba's guide about them: "${contact.guide}"`);
