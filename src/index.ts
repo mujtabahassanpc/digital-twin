@@ -376,33 +376,12 @@ function processBatchedMessage(
       // Generate AI reply with metadata
       const result = await generateReply(combinedText, history, senderName, senderId);
 
-      // --- Enhanced End Enforcer: Detect conversation ending & energy ---
-      const recentUserMsgs = history.filter(e => e.role === 'user').slice(-3);
+      // --- Natural Flow Guard: Let Mahir decide reply length naturally ---
+      // Only intervene if user is clearly ending with single-word acknowledgments
       const currentMsgShort = combinedText.trim().length <= 3;
-      const allShort = recentUserMsgs.length >= 2 && recentUserMsgs.every(e => e.content.trim().length <= 5);
-      const noQuestion = !recentUserMsgs.some(e => e.content.includes('?'));
-      const replyIsLong = result.text && result.text.split(' ').length > 12;
-
-      // Level 1: Single-word ending ("ok", "hmm", "k") → ultra short reply
       if (currentMsgShort && combinedText.trim().toLowerCase().match(/^(ok|hmm|hm|mm|k|hn|na|acha|thik|oh|haan|haa)$/)) {
-        const acknowledgments = ['thik ache', 'acha', 'mm', 'thik hai'];
-        result.text = acknowledgments[Math.floor(Math.random() * acknowledgments.length)];
-        console.log('✂️ Ultra-short ending detected — single-word acknowledgment');
-      }
-      // Level 2: User consistently giving short replies → trim to last complete sentence
-      else if (allShort && noQuestion && replyIsLong) {
-        const words = result.text.split(' ');
-        const trimmed = words.slice(0, 12).join(' ').trim();
-        // Find last sentence-ending punctuation before 12th word, cut there
-        const lastSentenceEnd = Math.max(trimmed.lastIndexOf('.'), trimmed.lastIndexOf('!'), trimmed.lastIndexOf('?'));
-        if (lastSentenceEnd > 0) {
-          result.text = trimmed.slice(0, lastSentenceEnd + 1);
-        } else {
-          // No sentence break found — keep only if it's a complete thought, otherwise send acknowledgment
-          const acknowledgments = ['thik ache', 'acha', 'thik hai', 'hmm'];
-          result.text = acknowledgments[Math.floor(Math.random() * acknowledgments.length)];
-        }
-        console.log('✂️ Reply trimmed to complete sentence (end enforcer)');
+        // Let Mahir handle it his way — don't overwrite, just note it
+        console.log('ℹ️ Short reply detected — Mahir will handle naturally');
       }
 
       // --- Serious mode: Detect urgent/harsh keywords → remove jokes/emojis ---
