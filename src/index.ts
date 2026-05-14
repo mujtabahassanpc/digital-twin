@@ -908,6 +908,8 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 
       // Start schedule checker (every 30 seconds)
       startScheduleChecker();
+      // Start proactive checker (every hour — birthdays, follow-ups)
+      startProactiveChecker();
 
       const PORT = config.port;
       app.listen(PORT, () => {
@@ -965,6 +967,75 @@ async function checkDbSize() {
   } catch (err) {
     console.error('DB size check error:', err);
   }
+}
+
+// Proactive Events Checker (every hour — birthdays, follow-ups)
+function startProactiveChecker() {
+  const ONE_HOUR = 60 * 60 * 1000;
+  const sentPath = path.join(__dirname, '..', 'data', 'proactive_sent.json');
+
+  setInterval(async () => {
+    try {
+      const { loadContacts } = await import('./ai.js');
+      const contacts = loadContacts();
+      const today = new Date();
+      const todayStr = String(today.getDate()).padStart(2, '0') + '-' + String(today.getMonth() + 1).padStart(2, '0');
+      const todayDb = today.toISOString().split('T')[0];
+      const hour = today.getHours();
+
+      let sentLog: Record<string, string[]> = {};
+      try { sentLog = JSON.parse(fs.readFileSync(sentPath, 'utf-8')); } catch { /* new */ }
+
+      // Check 1: Birthdays (once between 8-10 AM)
+      if (hour >= 8 && hour <= 10) {
+        for (const [phone, info] of Object.entries(contacts.contacts || {}) as [string, any][]) {
+          if (info.birthday === todayStr) {
+            const name = info.name || phone;
+            const logKey = `birthday_${phone}`;
+            if (!sentLog[logKey]?.includes(todayDb)) {
+              const msg = `🎂 Happy Birthday ${name}! 🎉\n\nMahir here! Mujtaba ka bhai. Allah aapko lambi umar de aur har khushi de. Bohot bohot mubarak ho! 🎊\n\n— Mahir Abher`;
+              await sendWhatsAppMessage(phone, msg);
+              if (!sentLog[logKey]) sentLog[logKey] = [];
+              sentLog[logKey].push(todayDb);
+              fs.writeFileSync(sentPath, JSON.stringify(sentLog, null, 2));
+              console.log(`🎂 Birthday wish sent to ${name} (${phone})`);
+              const { sendTelegramMessage } = await import('./telegram.js');
+              await sendTelegramMessage(`🎂 <b>Birthday Wish Sent!</b>\n\nMahir ne ${name} ko birthday wish kiya 🎉`);
+            }
+          }
+        }
+      }
+
+      // Check 2: Follow-ups on past topics (3+ days)
+      const followUpTopics: Record<string, string[]> = {
+        health: ['Kaisa lag raha hai ab?', 'Tabiyat thik hai ab?', 'Health kaisi hai ab?'],
+        education: ['Exam kaisa gaya?', 'Kaisa raha exam?', 'Result aaya kya?'],
+        work: ['Kaam kaisa chal raha hai?', 'Job me kya chal raha hai bhai?'],
+        call_request: ['Phone call ka kya hua?', 'Call kiya tumne?'],
+      };
+
+      for (const [phone, info] of Object.entries(contacts.contacts || {}) as [string, any][]) {
+        if (!info.last_topic || !info.last_seen) continue;
+        const msgs = followUpTopics[info.last_topic];
+        if (!msgs) continue;
+
+        const daysSince = (Date.now() - new Date(info.last_seen).getTime()) / 86400000;
+        if (daysSince < 3 || daysSince > 3.5) continue;
+
+        const logKey = `followup_${phone}_${info.last_topic}`;
+        if (sentLog[logKey]?.includes(todayDb)) continue;
+
+        const msg = msgs[Math.floor(Math.random() * msgs.length)];
+        await sendWhatsAppMessage(phone, msg);
+        if (!sentLog[logKey]) sentLog[logKey] = [];
+        sentLog[logKey].push(todayDb);
+        fs.writeFileSync(sentPath, JSON.stringify(sentLog, null, 2));
+        console.log(`🔄 Follow-up to ${phone} about ${info.last_topic}: "${msg}"`);
+      }
+    } catch (err) {
+      console.error('Proactive checker error:', err);
+    }
+  }, ONE_HOUR);
 }
 
 // Scheduled Message Checker

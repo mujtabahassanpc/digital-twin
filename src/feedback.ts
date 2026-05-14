@@ -5,6 +5,7 @@ import { sendTelegramMessage } from './telegram.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const feedbackPath = path.join(__dirname, '..', 'data', 'feedback.json');
+const languageExamplesPath = path.join(__dirname, '..', 'data', 'language_examples.json');
 
 interface FeedbackEntry {
   id: string;
@@ -96,6 +97,30 @@ export function rateReply(
     });
   }
   saveFeedback(feedback);
+
+  // Auto-learn from bad feedback: create a teaching example
+  if (rating === 'bad' && record && reason) {
+    try {
+      const langRaw = fs.readFileSync(languageExamplesPath, 'utf-8');
+      const lang = JSON.parse(langRaw);
+      const correction = `User said "${record.incomingMessage.slice(0, 60)}...". Instead of replying "${record.mahirReply.slice(0, 60)}...", try: ${reason}`;
+      // Don't add if too similar to existing examples
+      const exists = lang.examples?.some((ex: any) => ex.reason?.includes(reason.slice(0, 20)));
+      if (!exists) {
+        lang.examples = lang.examples || [];
+        lang.examples.push({
+          message: record.incomingMessage.slice(0, 100),
+          reason: correction.slice(0, 200),
+          added_at: new Date().toISOString(),
+          source: 'auto_learned_from_rating',
+        });
+        lang.last_updated = new Date().toISOString();
+        fs.writeFileSync(languageExamplesPath, JSON.stringify(lang, null, 2));
+        console.log(`📚 Auto-learned from bad rating: "${correction.slice(0, 80)}..."`);
+      }
+    } catch { /* silent */ }
+  }
+
   return true;
 }
 
@@ -150,16 +175,39 @@ export function markFeedbackReviewed(id: string) {
   }
 }
 
-export function getFeedbackContext(): string {
-  const bad = getUnreviewedBadFeedback().slice(-5);
-  if (bad.length === 0) return '';
+export function getFeedbackContext(senderId?: string): string {
+  const all = loadFeedback();
+  if (all.length === 0) return '';
 
-  let text = '## Recent Feedback (mistakes to learn from)\n';
+  const recent = all.slice(-15);
+  let text = '## Feedback & Learning (recent ratings)\n';
+
+  // Bad feedback first (mistakes to avoid)
+  const bad = recent.filter(f => f.rating === 'bad' && !f.reviewed).slice(-3);
   for (const b of bad) {
-    text += `- User said "${b.incomingMessage.slice(0, 80)}", Mahir replied "${b.mahirReply.slice(0, 80)}". `;
-    text += `User rated this BAD. Reason: ${b.reason || 'not given'}. `;
-    text += `Don't repeat this mistake.\n`;
+    text += `⚠️ User said "${b.incomingMessage.slice(0, 60)}", Mahir replied "${b.mahirReply.slice(0, 60)}". BAD. Reason: ${b.reason || 'not given'}. Don't repeat.\n`;
   }
+
+  // Good feedback (patterns to keep doing)
+  const good = recent.filter(f => f.rating === 'good').slice(-3);
+  for (const g of good) {
+    text += `✅ When user said "${g.incomingMessage.slice(0, 50)}", Mahir replied "${g.mahirReply.slice(0, 50)}". GOOD. Keep this pattern.\n`;
+  }
+
+  // Per-sender trend
+  if (senderId) {
+    const senderFeedback = all.filter(f => f.senderId === senderId && f.rating);
+    if (senderFeedback.length >= 3) {
+      const goodCount = senderFeedback.filter(f => f.rating === 'good').length;
+      const badCount = senderFeedback.filter(f => f.rating === 'bad').length;
+      const total = senderFeedback.length;
+      const pct = Math.round(goodCount / total * 100);
+      if (badCount > 0) {
+        text += `📊 This person: ${goodCount}/${total} good (${pct}%). ${badCount} bad ratings. Pay extra attention to what they like.\n`;
+      }
+    }
+  }
+
   return text;
 }
 

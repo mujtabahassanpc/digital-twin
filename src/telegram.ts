@@ -843,6 +843,53 @@ function loadLanguageExamples(): { examples: any[]; last_updated: string } {
       return sendTelegramMessage(`❌ Schedule not found: ${id}`);
     }
 
+    case 'birthday': {
+      // Format: /birthday <phone> <DD-MM> [name]
+      const bParts = args.split(' ');
+      if (bParts.length < 2) {
+        return sendTelegramMessage('Usage: /birthday <phone> <DD-MM> [name]\n\nSets birthday for a contact. Mahir will wish them.\n\nExample: /birthday 91987654321 15-08 Rahul\n\nTo see birthdays: /birthdays');
+      }
+      const bPhone = bParts[0];
+      const bDate = bParts[1];
+      const bName = bParts.slice(2).join(' ') || '';
+      if (!/^\d{2}-\d{2}$/.test(bDate)) {
+        return sendTelegramMessage('❌ Invalid date format. Use DD-MM (e.g., 15-08)');
+      }
+      try {
+        const contacts = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
+        if (!contacts.contacts[bPhone]) contacts.contacts[bPhone] = {};
+        contacts.contacts[bPhone].birthday = bDate;
+        if (bName) contacts.contacts[bPhone].name = bName;
+        contacts.last_updated = new Date().toISOString();
+        fs.writeFileSync(contactsPath, JSON.stringify(contacts, null, 2));
+        return sendTelegramMessage(`✅ Birthday set for <b>${bName || bPhone}</b> on <b>${bDate}</b>\n\nMahir unhe birthday pe wish karega 🎂`);
+      } catch {
+        return sendTelegramMessage('❌ Failed to save birthday');
+      }
+    }
+
+    case 'birthdays': {
+      try {
+        const contacts = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
+        const entries = Object.entries(contacts.contacts || {}) as [string, any][];
+        const withBdays = entries.filter(([, info]) => info.birthday);
+        if (withBdays.length === 0) {
+          return sendTelegramMessage('📋 Koi birthday saved nahi hai. Use /birthday <phone> <DD-MM> to add.');
+        }
+        const today = new Date();
+        const todayStr = String(today.getDate()).padStart(2, '0') + '-' + String(today.getMonth() + 1).padStart(2, '0');
+        let text = '🎂 <b>Saved Birthdays</b>\n\n';
+        for (const [phone, info] of withBdays) {
+          const name = info.name || phone;
+          const isToday = info.birthday === todayStr;
+          text += `• <b>${name}</b> — ${info.birthday}${isToday ? ' 🎉 TODAY!' : ''}\n`;
+        }
+        return sendTelegramMessage(text);
+      } catch {
+        return sendTelegramMessage('❌ Failed to read birthdays');
+      }
+    }
+
     case 'observe': {
       const phone = args.trim();
       const { toggleObserve } = await import('./index.js') as any;

@@ -250,6 +250,7 @@ function buildSystemPrompt(
   senderName?: string,
   relationshipInstruction?: string,
   feedbackContext?: string,
+  emotionContext?: string,
 ): string {
   let prompt = `${instructions}\n\n`;
 
@@ -280,6 +281,11 @@ function buildSystemPrompt(
   // Language examples taught via /teach
   if (languageExamples) {
     prompt += `${languageExamples}\n\n`;
+  }
+
+  // Emotion context — how the user is feeling right now
+  if (emotionContext) {
+    prompt += `${emotionContext}\n\n`;
   }
 
   // Time context
@@ -520,7 +526,7 @@ async function transcribeAudioSarvam(base64Data: string): Promise<string> {
     const blob = new Blob([buffer], { type: 'audio/ogg' });
     formData.append('file', blob, 'audio.ogg');
     formData.append('model', 'saarika:v2.5');
-    formData.append('language_code', 'bn-IN');
+    formData.append('language_code', 'hi-IN');
 
     const res = await fetch('https://api.sarvam.ai/speech-to-text', {
       method: 'POST',
@@ -565,8 +571,8 @@ export async function transcribeAudio(base64Data: string): Promise<string> {
         config: {
           encoding: 'OGG_OPUS',
           sampleRateHertz: 48000,
-          languageCode: 'bn-IN',
-          alternativeLanguageCodes: ['en-IN', 'hi-IN', 'en-US'],
+          languageCode: 'hi-IN',
+          alternativeLanguageCodes: ['en-IN', 'bn-IN', 'en-US'],
           model: 'latest_short',
           enableAutomaticPunctuation: true,
         },
@@ -653,6 +659,105 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, maxRetries: number = 2)
     }
   }
   throw lastErr;
+}
+
+// ============================================================
+// EMOTION AWARENESS — Detect user emotion → guide tone
+// ============================================================
+
+interface EmotionResult {
+  emotion: 'happy' | 'sad' | 'angry' | 'anxious' | 'urgent' | 'neutral' | 'confused' | 'grateful' | 'playful' | 'serious';
+  intensity: 'low' | 'medium' | 'high';
+  toneGuide: string;
+}
+
+const emotionPatterns: Record<string, { words: string[]; tone: string }> = {
+  happy: {
+    words: ['mast', 'badhiya', 'great', 'awesome', 'mashallah', 'alhamdulillah', 'khush', 'happy', 'enjoy', 'fun', 'wow', 'amazing', 'fantastic', 'super', 'lovely', 'beautiful', '😊', '😄', '😂', '🥳', '😍'],
+    tone: 'Match their positive energy. Be cheerful and warm. Short enthusiastic replies.',
+  },
+  sad: {
+    words: ['sad', 'dukhi', 'depressed', 'lonely', 'alone', 'cry', 'rona', 'miss', 'missing', 'hurt', 'pain', 'heartbroken', 'broken', 'upset', 'down', 'low', '😢', '😭', '🥺'],
+    tone: 'Show empathy. Be soft and gentle. Offer comfort. Don\'t try to cheer them up too aggressively.',
+  },
+  angry: {
+    words: ['gussa', 'angry', 'frustrated', 'annoyed', 'irritated', 'pissed', 'fed up', 'sick of', 'uff', 'bahut ho', 'enough', 'rage', 'furious', '😤', '😡', '🤬'],
+    tone: 'Stay calm and patient. Don\'t escalate. Acknowledge their frustration. Ask how to help.',
+  },
+  anxious: {
+    words: ['nervous', 'worried', 'anxious', 'tension', 'stress', 'scared', 'afraid', 'darr', 'panic', 'overthinking', 'confused', 'uncertain', 'fear', '😰', '😨', '😬'],
+    tone: 'Reassure them. Be calm and grounding. Don\'t dismiss their worries. Offer perspective.',
+  },
+  urgent: {
+    words: ['urgent', 'emergency', 'jaldi', 'help', 'quick', 'fast', 'immediately', 'asap', 'now', 'right now', 'critical', 'important', '🔥'],
+    tone: 'Be direct and efficient. Don\'t waste words. Show you take it seriously.',
+  },
+  confused: {
+    words: ['confused', 'confuse', 'samajh nahi', 'kya matlab', 'what mean', 'explain', 'clarity', 'doubt', 'unsure', 'clear', 'understand', '🤔', '😕'],
+    tone: 'Be helpful and explanatory. Simplify your language. Ask if they understood.',
+  },
+  grateful: {
+    words: ['thanks', 'thank you', 'shukriya', 'dhanyavaad', 'grateful', 'appreciate', 'bless you', 'thankful', '🙏', '❤️'],
+    tone: 'Be humble. "Koi baat nahi" energy. Matching gratitude warmly.',
+  },
+  playful: {
+    words: ['lol', 'haha', 'hehe', '😂', '🤣', '😜', '😝', 'funny', 'joke', 'mazak', 'teasing', 'chill', 'bro chill', 'pagal', 'crazy'],
+    tone: 'Match their playfulness. Be light and casual. Tease back gently.',
+  },
+  serious: {
+    words: ['serious', 'important', 'personal', 'private', 'secret', 'confidential', 'zaroori', 'need to talk', 'baat karni', 'matter', 'grave', 'death', 'died', 'accident', 'paisa', 'money', 'loan'],
+    tone: 'Be mature and focused. No jokes. No emojis. Show you understand the gravity.',
+  },
+};
+
+function detectEmotion(message: string): EmotionResult {
+  const lower = message.toLowerCase();
+  const scores: Record<string, { score: number; intensity: number }> = {};
+
+  for (const [emotion, config] of Object.entries(emotionPatterns)) {
+    let score = 0;
+    for (const word of config.words) {
+      if (lower.includes(word)) {
+        score += word.length > 3 ? 2 : 1;
+      }
+    }
+    // Exclamation marks → urgency/anger boost
+    if ((emotion === 'urgent' || emotion === 'angry') && (message.match(/!/g) || []).length >= 2) {
+      score += 2;
+    }
+    // Question marks → confusion/anxiety boost
+    if (emotion === 'confused' && (message.match(/\?/g) || []).length >= 2) {
+      score += 2;
+    }
+    // Caps → urgency/anger boost
+    if ((emotion === 'urgent' || emotion === 'angry') && /[A-Z]{4,}/.test(message)) {
+      score += 2;
+    }
+    if (score > 0) {
+      scores[emotion] = { score, intensity: score <= 2 ? 0 : score <= 4 ? 1 : 2 };
+    }
+  }
+
+  // Find highest scoring emotion
+  let bestEmotion: EmotionResult['emotion'] = 'neutral';
+  let bestScore = 0;
+  for (const [emotion, data] of Object.entries(scores)) {
+    if (data.score > bestScore) {
+      bestScore = data.score;
+      bestEmotion = emotion as EmotionResult['emotion'];
+    }
+  }
+
+  // Intensity mapping
+  const intensityLevels: EmotionResult['intensity'][] = ['low', 'medium', 'high'];
+  const intensityIdx = scores[bestEmotion]?.intensity ?? 0;
+  const intensity = intensityLevels[intensityIdx];
+
+  const toneGuide = bestEmotion !== 'neutral'
+    ? `User seems ${bestEmotion} (${intensity} intensity). ${emotionPatterns[bestEmotion]?.tone || 'Reply naturally.'}`
+    : 'User appears neutral. Reply casually in Hinglish.';
+
+  return { emotion: bestEmotion, intensity, toneGuide };
 }
 
 // ============================================================
@@ -783,7 +888,7 @@ export async function generateReply(
   const context = loadContext();
   const languageExamples = loadLanguageExamples();
   const styleProfile = loadStyleProfile();
-  const feedbackContext = getFeedbackContext();
+  const feedbackContext = getFeedbackContext(id);
   const contactsData = loadContacts();
   const contact = contactsData.contacts[id];
   const contactInfo = contact ? JSON.stringify(contact, null, 2) : '';
@@ -841,6 +946,12 @@ export async function generateReply(
     ? `\n\n📋 SCRIPTED REPLY INSTRUCTION (CRITICAL — FOLLOW THIS WHEN REPLYING): ${scriptInstruction}\nAfter replying naturally (not copy-paste), incorporate Mujtaba's instruction naturally into your response. THEN report back to Mujtaba via Telegram about what you said.`
     : '';
 
+  // Inject past conversation memories
+  const conversationMemories = injectMemories(id, senderName);
+
+  // Detect user emotion from their message
+  const emotionResult = detectEmotion(senderMessage);
+
   // Build system prompt — instructions + dynamic data only
   const timeContext = getTimeContext();
   // Observation summary (full conversation summary from observe mode)
@@ -851,8 +962,13 @@ export async function generateReply(
     enhancedContactInfo += `\n\n=== LEARNED FROM OBSERVING CONVERSATIONS ===\n${observationSummary}\n\nIMPORTANT: The global knowledge and language patterns above were observed from various conversations. They are tools you can use everywhere, but ADAPT them to each person. If talking to an elder, use respectful language even if the patterns show casual style. If talking to a friend, you can be casual. Always match the person you're talking to RIGHT NOW.`;
   }
 
+  let enhancedInstructions = instructions;
+  if (conversationMemories) {
+    enhancedInstructions = instructions + `\n\n${conversationMemories}`;
+  }
+
   let systemPrompt = buildSystemPrompt(
-    instructions,
+    enhancedInstructions,
     context,
     enhancedContactInfo,
     languageExamples,
@@ -862,6 +978,7 @@ export async function generateReply(
     senderName,
     relationshipInstruction,
     feedbackContext,
+    emotionResult.toneGuide,
   );
 
   // Append scripted reply injection if active
@@ -891,6 +1008,7 @@ export async function generateReply(
           recordOutgoing(id, cleaned);
           const newName = learnFromConversation(id, senderName, senderMessage, cleaned, conversationHistory);
           const nameLearned = newName ? { name: newName, phone: id } : undefined;
+          rememberConversation(id, conversationHistory, senderMessage, cleaned);
 
           console.log(`✅ ${provider.name}: ${cleaned.slice(0, 60)}...`);
           recordProviderSuccess(provider.name);
@@ -913,6 +1031,138 @@ export async function generateReply(
 
   console.log(`🤔 All providers failed for ${id} — fallback reply`);
   return makeResult(getFallbackReply());
+}
+
+// ============================================================
+// MEMORY 2.0 — Conversation Summarization + Recall
+// ============================================================
+
+const memoryPath = path.join(dataDir, 'conversation_memory.json');
+
+interface MemoryEntry {
+  id: string;
+  date: string;
+  summary: string;
+  topics: string[];
+  sentiment: 'positive' | 'negative' | 'neutral';
+  messageCount: number;
+  lastedMinutes: number;
+}
+
+function loadConversationMemory(): Record<string, MemoryEntry[]> {
+  try {
+    return JSON.parse(cachedRead(memoryPath));
+  } catch {
+    return {};
+  }
+}
+
+function saveConversationMemory(memory: Record<string, MemoryEntry[]>) {
+  try {
+    fs.writeFileSync(memoryPath, JSON.stringify(memory, null, 2));
+    invalidateCache(memoryPath);
+  } catch { /* silent */ }
+}
+
+function pruneOldMemories(memory: Record<string, MemoryEntry[]>): Record<string, MemoryEntry[]> {
+  const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
+  const pruned: Record<string, MemoryEntry[]> = {};
+  for (const [phone, entries] of Object.entries(memory)) {
+    const recent = entries.filter(e => new Date(e.date).getTime() > cutoff);
+    if (recent.length > 0) pruned[phone] = recent;
+  }
+  return pruned;
+}
+
+function buildSummary(history: any[], senderId: string, userMessage: string, aiReply: string): string {
+  const lower = (userMessage + ' ' + aiReply).toLowerCase();
+  let topics: string[] = [];
+  if (lower.includes('school') || lower.includes('exam') || lower.includes('class') || lower.includes('college') || lower.includes('study')) topics.push('education');
+  if (lower.includes('work') || lower.includes('job') || lower.includes('office') || lower.includes('kaam') || lower.includes('business')) topics.push('work');
+  if (lower.includes('family') || lower.includes('bhai') || lower.includes('maa') || lower.includes('baap') || lower.includes('didi') || lower.includes('mom') || lower.includes('dad')) topics.push('family');
+  if (lower.includes('health') || lower.includes('sick') || lower.includes('doctor') || lower.includes('hospital') || lower.includes('fever') || lower.includes('pain')) topics.push('health');
+  if (lower.includes('call') || lower.includes('phone') || lower.includes('meet') || lower.includes('mil')) topics.push('call_request');
+  if (lower.includes('friend') || lower.includes('party') || lower.includes('plan') || lower.includes('chalo') || lower.includes('outing')) topics.push('social');
+
+  // Detect sentiment
+  const negWords = ['dukhi', 'sad', 'tension', 'gussa', 'angry', 'pareshan', 'problem', 'issue', 'hurt', 'depressed', 'cry', 'rona', 'darr', 'scared', 'worried', 'stress'];
+  const posWords = ['happy', 'khush', 'mast', 'badhiya', 'great', 'awesome', 'achha', 'alhamdulillah', 'mashallah', 'fun', 'enjoy', 'excited', 'accha', 'wonderful', 'amazing'];
+  const hasNeg = negWords.some(w => lower.includes(w));
+  const hasPos = posWords.some(w => lower.includes(w));
+  let sentiment: 'positive' | 'negative' | 'neutral' = 'neutral';
+  if (hasPos && !hasNeg) sentiment = 'positive';
+  else if (hasNeg && !hasPos) sentiment = 'negative';
+  else if (hasPos && hasNeg) sentiment = 'neutral';
+
+  const lastUserMsg = history.length > 0 ? history[history.length - 1]?.content || '' : userMessage;
+  const summary = `User talked about ${topics.length > 0 ? topics.join(', ') : 'general chat'}. ${hasNeg ? 'User seemed upset/distressed.' : hasPos ? 'User seemed happy.' : 'Neutral conversation.'}`;
+
+  return summary;
+}
+
+function getContactMemories(phone: string): MemoryEntry[] {
+  const all = loadConversationMemory();
+  return all[phone] || [];
+}
+
+function injectMemories(phone: string, senderName?: string): string {
+  const memories = getContactMemories(phone);
+  if (memories.length === 0) return '';
+
+  const recent = memories.slice(-5);
+  if (recent.length === 0) return '';
+
+  let text = `## YOUR MEMORIES WITH THIS PERSON\n`;
+  text += `Yeh yaadein hain jo tumhe is insaan ke baare me yaad hain:\n`;
+  for (const m of recent) {
+    const date = new Date(m.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+    text += `- [${date}] ${m.summary}`;
+    if (m.sentiment !== 'neutral') text += ` (${m.sentiment === 'positive' ? '😊' : '😟'})`;
+    text += `\n`;
+  }
+  text += `\nUse these memories naturally in conversation — reference them if relevant, but don't sound like you're reading from a file.\n`;
+  return text;
+}
+
+function rememberConversation(senderId: string, history: any[], userMessage: string, aiReply: string) {
+  try {
+    const all = loadConversationMemory();
+    if (!all[senderId]) all[senderId] = [];
+
+    const summary = buildSummary(history, senderId, userMessage, aiReply);
+
+    const lower = (userMessage + ' ' + aiReply).toLowerCase();
+    const topics: string[] = [];
+    if (lower.includes('school') || lower.includes('exam') || lower.includes('class') || lower.includes('college') || lower.includes('study')) topics.push('education');
+    if (lower.includes('work') || lower.includes('job') || lower.includes('office') || lower.includes('kaam') || lower.includes('business')) topics.push('work');
+    if (lower.includes('family') || lower.includes('bhai') || lower.includes('maa') || lower.includes('baap') || lower.includes('didi') || lower.includes('mom') || lower.includes('dad')) topics.push('family');
+    if (lower.includes('health') || lower.includes('sick') || lower.includes('doctor') || lower.includes('hospital') || lower.includes('fever') || lower.includes('pain')) topics.push('health');
+
+    const negWords = ['dukhi', 'sad', 'tension', 'gussa', 'angry', 'pareshan', 'problem', 'issue', 'hurt', 'depressed', 'cry', 'rona', 'darr', 'scared', 'worried', 'stress'];
+    const posWords = ['happy', 'khush', 'mast', 'badhiya', 'great', 'awesome', 'achha', 'alhamdulillah', 'mashallah', 'fun', 'enjoy', 'excited', 'accha', 'wonderful', 'amazing'];
+    const hasNeg = negWords.some(w => lower.includes(w));
+    const hasPos = posWords.some(w => lower.includes(w));
+    let sentiment: 'positive' | 'negative' | 'neutral' = 'neutral';
+    if (hasPos && !hasNeg) sentiment = 'positive';
+    else if (hasNeg && !hasPos) sentiment = 'negative';
+
+    const entry: MemoryEntry = {
+      id: Math.random().toString(36).substring(2, 10),
+      date: new Date().toISOString(),
+      summary,
+      topics,
+      sentiment,
+      messageCount: history.length + 1,
+      lastedMinutes: Math.round((history.length || 1) * 2),
+    };
+
+    all[senderId].push(entry);
+    if (all[senderId].length > 20) all[senderId] = all[senderId].slice(-20);
+
+    // Prune old memories
+    const pruned = pruneOldMemories(all);
+    saveConversationMemory(pruned);
+  } catch { /* silent */ }
 }
 
 // ============================================================
@@ -1035,7 +1285,7 @@ export async function generateSpeech(text: string): Promise<Buffer | null> {
       },
       body: JSON.stringify({
         text,
-        target_language_code: 'bn-IN',
+        target_language_code: 'hi-IN',
         speaker: 'shubh',
         model: 'bulbul:v3',
         pace: 1.0,
